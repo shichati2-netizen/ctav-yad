@@ -12,21 +12,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Extract and inspect source files
+      - name: Inspect runtime storage paths
         shell: pwsh
         run: |
           $archive = Get-ChildItem -Filter '*.zip' -File | Select-Object -First 1
           $dest = Join-Path $env:RUNNER_TEMP 'ctav-yad-src'
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath $dest -Force
-          $files = Get-ChildItem $dest -Recurse -File
-          foreach ($relative in @('src/db/schema.ts','src/db/index.ts','src/lib/lmstore.ts','src/lib/mishkefet/engine.ts','src/lib/mishkefet/lm.ts','src/lib/mishkefet/decode.ts','src/lib/mishkefet/preprocess.ts','src/lib/mishkefet/train.ts','src/app/api/documents/route.ts','src/app/api/adapt/route.ts','src/app/api/lines/[id]/route.ts','src/app/api/dataset/zip/route.ts','src/components/TranscriberApp.tsx','tsconfig.json')) {
+          foreach ($relative in @('src/lib/dataset.ts','src/lib/mishkefet/engine.ts','src/db/schema.ts','src/app/api/lines/[id]/route.ts','src/app/api/adapt/route.ts','drizzle.config.json')) {
             $path = Join-Path $dest $relative
             if (Test-Path $path) {
               Write-Host ('===== FILE: ' + $relative + ' =====')
               Get-Content -Raw $path | Write-Host
             }
           }
-          Write-Host '===== DATABASE USAGE LOCATIONS ====='
-          $files | Where-Object { $_.Extension -in @('.ts','.tsx') } | Select-String -Pattern 'db\.' | Select-Object -First 200 Path,LineNumber,Line | Format-List | Out-String | Write-Host
-          Write-Host '===== COMPLETE DATA INVENTORY ====='
-          $files | Where-Object { $_.FullName -match 'models|tessdata|tesseract|\.wasm$|\.onnx$|\.bin$|\.npz$|\.pt$|\.pth$|\.traineddata$|\.json$|\.db$|\.sqlite$' } | Select-Object FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
