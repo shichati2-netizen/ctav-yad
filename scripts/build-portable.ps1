@@ -115,6 +115,27 @@ Invoke-Checked "npm" @("install", "--no-audit", "--no-fund") "npm install failed
 Invoke-Checked "npm" @("install", "@electric-sql/pglite", "--save", "--no-audit", "--no-fund") "Installing PGlite failed."
 Invoke-Checked "npm" @("install", "onnxruntime-node@latest", "--save", "--no-audit", "--no-fund") "Updating ONNX Runtime failed."
 Invoke-Checked "npm" @("ls", "onnxruntime-node") "Could not verify ONNX Runtime package version."
+
+# Keep the Windows ONNX Runtime DLL beside the app executable. Windows may otherwise
+# resolve an older onnxruntime.dll from System32 before the package-local one.
+$ortNativeDir = Join-Path $source "node_modules/onnxruntime-node/bin/napi-v3/win32/x64"
+$ortDll = Join-Path $ortNativeDir "onnxruntime.dll"
+if (-not (Test-Path $ortDll)) {
+  $foundOrtDll = Get-ChildItem (Join-Path $source "node_modules/onnxruntime-node") -Recurse -Filter "onnxruntime.dll" -File | Select-Object -First 1
+  if ($foundOrtDll) {
+    $ortNativeDir = $foundOrtDll.DirectoryName
+    $ortDll = $foundOrtDll.FullName
+  }
+}
+if (-not (Test-Path $ortDll)) { throw "Could not find the Windows x64 onnxruntime.dll inside onnxruntime-node." }
+$ortVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($ortDll).FileVersion
+Write-Host "Bundled ONNX DLL: $ortDll"
+Write-Host "Bundled ONNX DLL version: $ortVersion"
+
+$runtimeNativeDir = Join-Path $source "runtime-native"
+New-Item -ItemType Directory -Force -Path $runtimeNativeDir | Out-Null
+Copy-Item -Path (Join-Path $ortNativeDir "*") -Destination $runtimeNativeDir -Recurse -Force
+
 Invoke-Checked "npm" @("install", "--save-dev", "electron", "electron-builder", "--no-audit", "--no-fund") "Installing Electron build tools failed."
 
 # The Electron launcher is deliberately small; the actual app and all models are placed in resources/app.
@@ -133,6 +154,7 @@ $buildConfig = @{
     signAndEditExecutable = $false
   }
   portable = @{ artifactName = "KtavYad-Portable.exe" }
+  extraFiles = @(@{ from = "runtime-native"; to = "." })
 }
 $pkg | Add-Member -NotePropertyName build -NotePropertyValue $buildConfig -Force
 $pkg | ConvertTo-Json -Depth 100 | Set-Content package.json -Encoding utf8
@@ -290,8 +312,21 @@ try {
   node -e "const fs=require('fs');const p='models/mishkefet';const c=JSON.parse(fs.readFileSync(p+'/charset.json','utf8'));if(!Array.isArray(c)||c.length!==198)throw new Error('Unexpected charset');const h=fs.readFileSync(p+'/head.bin');if(h.toString('ascii',0,4)!=='MKH1')throw new Error('Invalid head.bin');for(const f of ['charlm.bin','words.bin','backbone.fp16.onnx'])if(fs.statSync(p+'/'+f).size<1000)throw new Error('Invalid '+f);console.log('Model assets OK; charset='+c.length);"
   if ($LASTEXITCODE -ne 0) { throw "Model asset verification failed." }
 
-  node -e "const ort=require('onnxruntime-node');ort.InferenceSession.create('models/mishkefet/backbone.fp16.onnx',{executionProviders:['cpu'],graphOptimizationLevel:'disabled'}).then(s=>{console.log('ONNX model loaded:',s.inputNames[0],'=>',s.outputNames[0]);process.exit(0)}).catch(e=>{console.error(e);process.exit(1)});"
-  if ($LASTEXITCODE -ne 0) { throw "ONNX Runtime could not load the bundled model." }
+  # Run Node from a clean directory with the package's own DLL beside node.exe.
+  # This reproduces the executable-directory-first DLL lookup used by the packaged Electron app.
+  $smokeNodeDir = Join-Path $env:RUNNER_TEMP "node-with-bundled-ort"
+  New-Item -ItemType Directory -Force -Path $smokeNodeDir | Out-Null
+  $nodeExe = (Get-Command node).Source
+  Copy-Item -LiteralPath $nodeExe -Destination (Join-Path $smokeNodeDir "node.exe") -Force
+  Copy-Item -LiteralPath (Join-Path $runtimeNativeDir "onnxruntime.dll") -Destination (Join-Path $smokeNodeDir "onnxruntime.dll") -Force
+
+  $loadedOrtDll = Join-Path $smokeNodeDir "onnxruntime.dll"
+  $loadedOrtVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($loadedOrtDll).FileVersion
+  Write-Host "Smoke-test executable: $(Join-Path $smokeNodeDir 'node.exe')"
+  Write-Host "Smoke-test ONNX DLL: $loadedOrtVersion"
+
+  & (Join-Path $smokeNodeDir "node.exe") -e "const ort=require('onnxruntime-node');ort.InferenceSession.create('models/mishkefet/backbone.fp16.onnx',{executionProviders:['cpu'],graphOptimizationLevel:'disabled'}).then(s=>{console.log('ONNX model loaded:',s.inputNames[0],'=>',s.outputNames[0]);process.exit(0)}).catch(e=>{console.error(e);process.exit(1)});"
+  if ($LASTEXITCODE -ne 0) { throw "ONNX Runtime could not load the bundled model using the package-matched DLL." }
 
   if (-not (Test-Path "public/tessdata/heb.traineddata")) { throw "Hebrew Tesseract data is missing." }
 
