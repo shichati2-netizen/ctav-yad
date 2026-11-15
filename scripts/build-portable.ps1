@@ -116,9 +116,9 @@ Invoke-Checked "npm" @("install", "@electric-sql/pglite", "--save", "--no-audit"
 Invoke-Checked "npm" @("install", "onnxruntime-node@latest", "--save", "--no-audit", "--no-fund") "Updating ONNX Runtime failed."
 Invoke-Checked "npm" @("ls", "onnxruntime-node") "Could not verify ONNX Runtime package version."
 
-# Keep the Windows x64 ONNX Runtime DLL beside the app executable.
-# Windows may otherwise resolve an older onnxruntime.dll from System32.
-# Select x64 explicitly: a recursive first-match can pick the ARM64 binary.
+# Use a private DLL name because Windows may resolve System32\onnxruntime.dll
+# even when an app-local copy exists. The N-API binding's PE import table is patched
+# to reference our private copy, avoiding Windows 11's inbox ORT 1.17.1.
 $ortBinRoot = Join-Path $source "node_modules/onnxruntime-node/bin"
 $ortDllCandidate = Get-ChildItem $ortBinRoot -Recurse -Filter "onnxruntime.dll" -File |
   Where-Object { $_.FullName -match '[\\/]win32[\\/]x64[\\/]' } |
@@ -132,6 +132,47 @@ $ortDll = $ortDllCandidate.FullName
 $ortVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($ortDll).FileVersion
 Write-Host "Bundled Windows x64 ONNX DLL: $ortDll"
 Write-Host "Bundled ONNX DLL version: $ortVersion"
+
+$privateOrtName = "ctavort.dll"
+$oldImportName = [System.Text.Encoding]::ASCII.GetBytes("onnxruntime.dll")
+$newImportName = [System.Text.Encoding]::ASCII.GetBytes($privateOrtName)
+if ($newImportName.Length -gt $oldImportName.Length) {
+  throw "Private ONNX DLL name must not exceed the original import-name length."
+}
+$paddedImportName = New-Object byte[] $oldImportName.Length
+[Array]::Copy($newImportName, 0, $paddedImportName, 0, $newImportName.Length)
+
+$patchedImports = 0
+$nativeBinaries = Get-ChildItem $ortNativeDir -Recurse -File |
+  Where-Object { $_.Extension -in @(".node", ".dll") }
+foreach ($binary in $nativeBinaries) {
+  $bytes = [System.IO.File]::ReadAllBytes($binary.FullName)
+  $changed = $false
+  for ($i = 0; $i -le ($bytes.Length - $oldImportName.Length); $i++) {
+    $match = $true
+    for ($k = 0; $k -lt $oldImportName.Length; $k++) {
+      if ($bytes[$i + $k] -ne $oldImportName[$k]) { $match = $false; break }
+    }
+    if ($match) {
+      [Array]::Copy($paddedImportName, 0, $bytes, $i, $paddedImportName.Length)
+      $patchedImports++
+      $changed = $true
+      $i += $oldImportName.Length - 1
+    }
+  }
+  if ($changed) {
+    [System.IO.File]::WriteAllBytes($binary.FullName, $bytes)
+    Write-Host "Patched ONNX import name in: $($binary.Name)"
+  }
+}
+if ($patchedImports -lt 1) {
+  throw "No native PE import references to onnxruntime.dll were found; refusing to create an unsafe package."
+}
+
+$privateOrtDll = Join-Path $ortNativeDir $privateOrtName
+Move-Item -LiteralPath $ortDll -Destination $privateOrtDll -Force
+$ortDll = $privateOrtDll
+Write-Host "Private ONNX DLL name: $privateOrtName (patched $patchedImports import reference(s))"
 $runtimeNativeDir = Join-Path $source "runtime-native"
 New-Item -ItemType Directory -Force -Path $runtimeNativeDir | Out-Null
 Copy-Item -Path (Join-Path $ortNativeDir "*") -Destination $runtimeNativeDir -Recurse -Force
@@ -328,9 +369,9 @@ try {
   New-Item -ItemType Directory -Force -Path $smokeNodeDir | Out-Null
   $nodeExe = (Get-Command node).Source
   Copy-Item -LiteralPath $nodeExe -Destination (Join-Path $smokeNodeDir "node.exe") -Force
-  Copy-Item -LiteralPath (Join-Path $runtimeNativeDir "onnxruntime.dll") -Destination (Join-Path $smokeNodeDir "onnxruntime.dll") -Force
+  Copy-Item -LiteralPath (Join-Path $runtimeNativeDir "ctavort.dll") -Destination (Join-Path $smokeNodeDir "ctavort.dll") -Force
 
-  $loadedOrtDll = Join-Path $smokeNodeDir "onnxruntime.dll"
+  $loadedOrtDll = Join-Path $smokeNodeDir "ctavort.dll"
   $loadedOrtVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($loadedOrtDll).FileVersion
   Write-Host "Smoke-test executable: $(Join-Path $smokeNodeDir 'node.exe')"
   Write-Host "Smoke-test ONNX DLL: $loadedOrtVersion"
