@@ -305,11 +305,14 @@ New-Item -ItemType Directory -Force -Path $staticDest | Out-Null
 Copy-Item -Path (Join-Path $source ".next/static/*") -Destination $staticDest -Recurse -Force
 Copy-Item -Path (Join-Path $source "models") -Destination $standalone -Recurse -Force
 Copy-Item -Path (Join-Path $source "drizzle") -Destination $standalone -Recurse -Force
-$standaloneOrtDir = Join-Path $standalone "node_modules/onnxruntime-node/bin/napi-v3/win32/x64"
-New-Item -ItemType Directory -Force -Path $standaloneOrtDir | Out-Null
-Copy-Item -Path (Join-Path $runtimeNativeDir "*") -Destination $standaloneOrtDir -Recurse -Force
-if (-not (Test-Path (Join-Path $standaloneOrtDir "onnxruntime.dll"))) {
-  throw "The ONNX native DLL was not copied into the Next.js standalone package."
+$sourceOrtBin = Join-Path $source "node_modules/onnxruntime-node/bin"
+$standaloneOrtBin = Join-Path $standalone "node_modules/onnxruntime-node/bin"
+New-Item -ItemType Directory -Force -Path $standaloneOrtBin | Out-Null
+Copy-Item -Path (Join-Path $sourceOrtBin "*") -Destination $standaloneOrtBin -Recurse -Force
+$ortRelativePath = [System.IO.Path]::GetRelativePath($sourceOrtBin, $ortDll)
+$standaloneOrtDll = Join-Path $standaloneOrtBin $ortRelativePath
+if (-not (Test-Path $standaloneOrtDll)) {
+  throw "The matching ONNX native DLL was not copied into the Next.js standalone package: $ortRelativePath"
 }
 
 
