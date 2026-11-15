@@ -113,6 +113,8 @@ export default defineConfig({
 Set-Location $source
 Invoke-Checked "npm" @("install", "--no-audit", "--no-fund") "npm install failed."
 Invoke-Checked "npm" @("install", "@electric-sql/pglite", "--save", "--no-audit", "--no-fund") "Installing PGlite failed."
+Invoke-Checked "npm" @("install", "onnxruntime-node@latest", "--save", "--no-audit", "--no-fund") "Updating ONNX Runtime failed."
+Invoke-Checked "npm" @("ls", "onnxruntime-node") "Could not verify ONNX Runtime package version."
 Invoke-Checked "npm" @("install", "--save-dev", "electron", "electron-builder", "--no-audit", "--no-fund") "Installing Electron build tools failed."
 
 # The Electron launcher is deliberately small; the actual app and all models are placed in resources/app.
