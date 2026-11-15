@@ -22,7 +22,7 @@ $assets = @("backbone.fp16.onnx", "charlm.bin", "words.bin", "head.bin", "charse
 foreach ($name in $assets) {
   $target = Join-Path $modelDir $name
   Write-Host "Downloading model asset: $name"
-  Invoke-WebRequest -Uri "$modelBase/$name?download=true" -OutFile $target
+  Invoke-WebRequest -Uri "$modelBase/$name" -OutFile $target
   if (-not (Test-Path $target) -or (Get-Item $target).Length -lt 100) {
     throw "Model asset download failed or returned an invalid file: $name"
   }
