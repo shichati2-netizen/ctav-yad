@@ -12,7 +12,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Extract and list source
+      - name: Extract and inspect source files
         shell: pwsh
         run: |
           $archive = Get-ChildItem -Filter '*.zip' -File | Select-Object -First 1
@@ -22,7 +22,12 @@ jobs:
           $files = Get-ChildItem $dest -Recurse -File
           Write-Host ('FILE COUNT: ' + $files.Count)
           $files | Select-Object -First 500 FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
-          Write-Host '=== ENTRY AND BUILD FILES ==='
-          $files | Where-Object { $_.Name -match '^(main|app|gui|run|launcher)\.py$|requirements.*\.txt|pyproject\.toml|setup\.py|package\.json|\.spec$|\.sln$|\.csproj$' } | Select-Object FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
-          Write-Host '=== MODEL FILES ==='
-          $files | Where-Object { $_.Extension -match '^\.(pt|pth|onnx|h5|keras|pb|tflite|npz|safetensors|bin|ckpt|model|pkl|joblib|weights)$' } | Select-Object FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
+          foreach ($relative in @('package.json','next.config.ts','drizzle.config.json','drizzle.config.ts','README.md','src/db/index.ts','src/lib/model.ts','src/lib/ocr.ts','src/lib/vision.ts','src/lib/serverOcr.ts','src/app/api/health/route.ts','src/app/api/model/route.ts','src/app/api/ocr/route.ts','src/app/api/recognize/route.ts','src/app/api/train/route.ts')) {
+            $path = Join-Path $dest $relative
+            if (Test-Path $path) {
+              Write-Host ('===== FILE: ' + $relative + ' =====')
+              Get-Content -Raw $path | Write-Host
+            }
+          }
+          Write-Host '=== MODEL / DATA ASSETS ==='
+          $files | Where-Object { $_.FullName -match 'models|public|\.wasm$|\.onnx$|\.bin$|\.npz$|\.pt$|\.pth$|\.json$|\.db$|\.sqlite$' } | Select-Object FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
