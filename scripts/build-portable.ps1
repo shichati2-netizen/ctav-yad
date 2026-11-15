@@ -32,8 +32,8 @@ foreach ($name in $assets) {
 $tessDir = Join-Path $source "public/tessdata"
 New-Item -ItemType Directory -Force -Path $tessDir | Out-Null
 $trainedData = Join-Path $tessDir "heb.traineddata"
-Invoke-WebRequest -Uri "https://tessdata.projectnaptha.com/4.0.0/heb.traineddata" -OutFile $trainedData
-if ((Get-Item $trainedData).Length -lt 1000000) { throw "Hebrew Tesseract traineddata download is incomplete." }
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/heb.traineddata" -OutFile $trainedData
+if ((Get-Item $trainedData).Length -lt 500000) { throw "Hebrew Tesseract traineddata download is incomplete." }
 
 @"
 Mishkefet-v1
