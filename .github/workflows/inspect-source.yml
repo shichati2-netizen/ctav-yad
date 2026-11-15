@@ -16,18 +16,17 @@ jobs:
         shell: pwsh
         run: |
           $archive = Get-ChildItem -Filter '*.zip' -File | Select-Object -First 1
-          if (-not $archive) { throw 'ZIP not found' }
           $dest = Join-Path $env:RUNNER_TEMP 'ctav-yad-src'
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath $dest -Force
           $files = Get-ChildItem $dest -Recurse -File
-          Write-Host ('FILE COUNT: ' + $files.Count)
-          $files | Select-Object -First 500 FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
-          foreach ($relative in @('package.json','next.config.ts','drizzle.config.json','drizzle.config.ts','README.md','src/db/index.ts','src/lib/model.ts','src/lib/ocr.ts','src/lib/vision.ts','src/lib/serverOcr.ts','src/app/api/health/route.ts','src/app/api/model/route.ts','src/app/api/ocr/route.ts','src/app/api/recognize/route.ts','src/app/api/train/route.ts')) {
+          foreach ($relative in @('src/db/schema.ts','src/db/index.ts','src/lib/lmstore.ts','src/lib/mishkefet/engine.ts','src/lib/mishkefet/lm.ts','src/lib/mishkefet/decode.ts','src/lib/mishkefet/preprocess.ts','src/lib/mishkefet/train.ts','src/app/api/documents/route.ts','src/app/api/adapt/route.ts','src/app/api/lines/[id]/route.ts','src/app/api/dataset/zip/route.ts','src/components/TranscriberApp.tsx','tsconfig.json')) {
             $path = Join-Path $dest $relative
             if (Test-Path $path) {
               Write-Host ('===== FILE: ' + $relative + ' =====')
               Get-Content -Raw $path | Write-Host
             }
           }
-          Write-Host '=== MODEL / DATA ASSETS ==='
-          $files | Where-Object { $_.FullName -match 'models|public|\.wasm$|\.onnx$|\.bin$|\.npz$|\.pt$|\.pth$|\.json$|\.db$|\.sqlite$' } | Select-Object FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
+          Write-Host '===== DATABASE USAGE LOCATIONS ====='
+          $files | Where-Object { $_.Extension -in @('.ts','.tsx') } | Select-String -Pattern 'db\.' | Select-Object -First 200 Path,LineNumber,Line | Format-List | Out-String | Write-Host
+          Write-Host '===== COMPLETE DATA INVENTORY ====='
+          $files | Where-Object { $_.FullName -match 'models|tessdata|tesseract|\.wasm$|\.onnx$|\.bin$|\.npz$|\.pt$|\.pth$|\.traineddata$|\.json$|\.db$|\.sqlite$' } | Select-Object FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
