@@ -1,0 +1,28 @@
+name: Inspect ctav-yad source
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - self-training-hebrew-handwriting-ocr.zip
+      - .github/workflows/inspect-source.yml
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract and list source
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem -Filter '*.zip' -File | Select-Object -First 1
+          if (-not $archive) { throw 'ZIP not found' }
+          $dest = Join-Path $env:RUNNER_TEMP 'ctav-yad-src'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $dest -Force
+          $files = Get-ChildItem $dest -Recurse -File
+          Write-Host ('FILE COUNT: ' + $files.Count)
+          $files | Select-Object -First 500 FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
+          Write-Host '=== ENTRY AND BUILD FILES ==='
+          $files | Where-Object { $_.Name -match '^(main|app|gui|run|launcher)\.py$|requirements.*\.txt|pyproject\.toml|setup\.py|package\.json|\.spec$|\.sln$|\.csproj$' } | Select-Object FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
+          Write-Host '=== MODEL FILES ==='
+          $files | Where-Object { $_.Extension -match '^\.(pt|pth|onnx|h5|keras|pb|tflite|npz|safetensors|bin|ckpt|model|pkl|joblib|weights)$' } | Select-Object FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
