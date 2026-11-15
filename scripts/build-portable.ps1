@@ -116,22 +116,22 @@ Invoke-Checked "npm" @("install", "@electric-sql/pglite", "--save", "--no-audit"
 Invoke-Checked "npm" @("install", "onnxruntime-node@latest", "--save", "--no-audit", "--no-fund") "Updating ONNX Runtime failed."
 Invoke-Checked "npm" @("ls", "onnxruntime-node") "Could not verify ONNX Runtime package version."
 
-# Keep the Windows ONNX Runtime DLL beside the app executable. Windows may otherwise
-# resolve an older onnxruntime.dll from System32 before the package-local one.
-$ortNativeDir = Join-Path $source "node_modules/onnxruntime-node/bin/napi-v3/win32/x64"
-$ortDll = Join-Path $ortNativeDir "onnxruntime.dll"
-if (-not (Test-Path $ortDll)) {
-  $foundOrtDll = Get-ChildItem (Join-Path $source "node_modules/onnxruntime-node") -Recurse -Filter "onnxruntime.dll" -File | Select-Object -First 1
-  if ($foundOrtDll) {
-    $ortNativeDir = $foundOrtDll.DirectoryName
-    $ortDll = $foundOrtDll.FullName
-  }
+# Keep the Windows x64 ONNX Runtime DLL beside the app executable.
+# Windows may otherwise resolve an older onnxruntime.dll from System32.
+# Select x64 explicitly: a recursive first-match can pick the ARM64 binary.
+$ortBinRoot = Join-Path $source "node_modules/onnxruntime-node/bin"
+$ortDllCandidate = Get-ChildItem $ortBinRoot -Recurse -Filter "onnxruntime.dll" -File |
+  Where-Object { $_.FullName -match '[\\/]win32[\\/]x64[\\/]' } |
+  Select-Object -First 1
+if (-not $ortDllCandidate) {
+  $available = Get-ChildItem $ortBinRoot -Recurse -Filter "onnxruntime.dll" -File | Select-Object -ExpandProperty FullName
+  throw "Could not find the Windows x64 onnxruntime.dll. Available DLLs: $($available -join '; ')"
 }
-if (-not (Test-Path $ortDll)) { throw "Could not find the Windows x64 onnxruntime.dll inside onnxruntime-node." }
+$ortNativeDir = $ortDllCandidate.DirectoryName
+$ortDll = $ortDllCandidate.FullName
 $ortVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($ortDll).FileVersion
-Write-Host "Bundled ONNX DLL: $ortDll"
+Write-Host "Bundled Windows x64 ONNX DLL: $ortDll"
 Write-Host "Bundled ONNX DLL version: $ortVersion"
-
 $runtimeNativeDir = Join-Path $source "runtime-native"
 New-Item -ItemType Directory -Force -Path $runtimeNativeDir | Out-Null
 Copy-Item -Path (Join-Path $ortNativeDir "*") -Destination $runtimeNativeDir -Recurse -Force
