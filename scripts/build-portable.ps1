@@ -134,41 +134,49 @@ Write-Host "Bundled Windows x64 ONNX DLL: $ortDll"
 Write-Host "Bundled ONNX DLL version: $ortVersion"
 
 $privateOrtName = "ctavort.dll"
-$oldImportName = [System.Text.Encoding]::ASCII.GetBytes("onnxruntime.dll")
-$newImportName = [System.Text.Encoding]::ASCII.GetBytes($privateOrtName)
-if ($newImportName.Length -gt $oldImportName.Length) {
-  throw "Private ONNX DLL name must not exceed the original import-name length."
-}
-$paddedImportName = New-Object byte[] $oldImportName.Length
-[Array]::Copy($newImportName, 0, $paddedImportName, 0, $newImportName.Length)
+$privateOrtName = "ctavort.dll"
+$patchScript = Join-Path $env:RUNNER_TEMP "patch-onnx-import.cjs"
+@'
+const fs = require("node:fs");
+const path = require("node:path");
+const root = process.argv[2];
+const oldName = Buffer.from("onnxruntime.dll", "ascii");
+const newName = Buffer.alloc(oldName.length);
+Buffer.from("ctavort.dll", "ascii").copy(newName);
+let total = 0;
 
-$patchedImports = 0
-$nativeBinaries = Get-ChildItem $ortNativeDir -Recurse -File |
-  Where-Object { $_.Extension -in @(".node", ".dll") }
-foreach ($binary in $nativeBinaries) {
-  $bytes = [System.IO.File]::ReadAllBytes($binary.FullName)
-  $changed = $false
-  for ($i = 0; $i -le ($bytes.Length - $oldImportName.Length); $i++) {
-    $match = $true
-    for ($k = 0; $k -lt $oldImportName.Length; $k++) {
-      if ($bytes[$i + $k] -ne $oldImportName[$k]) { $match = $false; break }
+function walk(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      walk(full);
+      continue;
     }
-    if ($match) {
-      [Array]::Copy($paddedImportName, 0, $bytes, $i, $paddedImportName.Length)
-      $patchedImports++
-      $changed = $true
-      $i += $oldImportName.Length - 1
+    if (!entry.isFile() || ![".node", ".dll"].includes(path.extname(entry.name).toLowerCase())) continue;
+    const bytes = fs.readFileSync(full);
+    let offset = 0;
+    let count = 0;
+    while ((offset = bytes.indexOf(oldName, offset)) !== -1) {
+      newName.copy(bytes, offset);
+      offset += oldName.length;
+      count++;
+    }
+    if (count) {
+      fs.writeFileSync(full, bytes);
+      total += count;
+      process.stdout.write("Patched " + full + ": " + count + " reference(s)\n");
     }
   }
-  if ($changed) {
-    [System.IO.File]::WriteAllBytes($binary.FullName, $bytes)
-    Write-Host "Patched ONNX import name in: $($binary.Name)"
-  }
-}
-if ($patchedImports -lt 1) {
-  throw "No native PE import references to onnxruntime.dll were found; refusing to create an unsafe package."
 }
 
+walk(root);
+if (total < 1) {
+  process.stderr.write("No native PE import references to onnxruntime.dll were found.\n");
+  process.exit(1);
+}
+process.stdout.write("Total private ONNX import references: " + total + "\n");
+'@ | Set-Content -Path $patchScript -Encoding utf8
+Invoke-Checked "node" @($patchScript, $ortNativeDir) "Patching ONNX native imports to the private DLL name failed."
 $privateOrtDll = Join-Path $ortNativeDir $privateOrtName
 Move-Item -LiteralPath $ortDll -Destination $privateOrtDll -Force
 $ortDll = $privateOrtDll
