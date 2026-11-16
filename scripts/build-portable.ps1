@@ -68,50 +68,8 @@ export const databaseReady = buildMode
 '@ | Set-Content -Path $dbFile -Encoding utf8
 
 @'
-import fs from "node:fs";
-import path from "node:path";
-
-async function preloadWindowsOnnxRuntime() {
-  if (process.platform !== "win32") return;
-
-  const binRoot = path.join(process.cwd(), "node_modules", "onnxruntime-node", "bin");
-  if (!fs.existsSync(binRoot)) {
-    throw new Error("onnxruntime-node native binary folder is missing: " + binRoot);
-  }
-
-  const napiFolders = fs.readdirSync(binRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && /^napi-v\d+$/.test(entry.name))
-    .map((entry) => entry.name)
-    .sort((a, b) => Number(b.slice(6)) - Number(a.slice(6)));
-
-  const candidates = napiFolders.map((folder) =>
-    path.join(binRoot, folder, "win32", process.arch, "onnxruntime.dll")
-  );
-  const dllPath = candidates.find((candidate) => fs.existsSync(candidate));
-  if (!dllPath) {
-    throw new Error("Matching Windows ONNX Runtime DLL not found. Checked: " + candidates.join("; "));
-  }
-
-  const koffiModule = await import("koffi");
-  const koffi = koffiModule.default;
-  const kernel32 = koffi.load("kernel32.dll");
-  const loadLibraryExW = kernel32.func("__stdcall", "LoadLibraryExW", "void *", ["str16", "void *", "uint32"]);
-
-  // LOAD_WITH_ALTERED_SEARCH_PATH (0x00000008) loads this exact DLL and
-  // searches its own folder first for dependent DLLs.
-  const handle = loadLibraryExW(dllPath, null, 0x00000008);
-  if (handle == null) {
-    throw new Error("Windows could not preload the application-local ONNX Runtime DLL: " + dllPath);
-  }
-
-  // Keep the function library and module handle alive for this process.
-  (globalThis as Record<string, unknown>).__ctavYadOrtPreload = { kernel32, handle, dllPath };
-  console.info("[KtavYad] Preloaded ONNX Runtime from:", dllPath);
-}
-
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs" && process.env.CTAV_BUILD_MODE !== "1") {
-    await preloadWindowsOnnxRuntime();
     const { databaseReady } = await import("./db");
     await databaseReady;
   }
@@ -156,7 +114,6 @@ Set-Location $source
 Invoke-Checked "npm" @("install", "--no-audit", "--no-fund") "npm install failed."
 Invoke-Checked "npm" @("install", "@electric-sql/pglite", "--save", "--no-audit", "--no-fund") "Installing PGlite failed."
 Invoke-Checked "npm" @("install", "onnxruntime-node@latest", "--save", "--no-audit", "--no-fund") "Updating ONNX Runtime failed."
-Invoke-Checked "npm" @("install", "koffi", "--save", "--no-audit", "--no-fund") "Installing Koffi Windows API loader failed."
 Invoke-Checked "npm" @("ls", "onnxruntime-node") "Could not verify ONNX Runtime package version."
 
 # Use a private DLL name because Windows may resolve System32\onnxruntime.dll
@@ -176,7 +133,57 @@ $ortVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($ortDll).File
 Write-Host "Bundled Windows x64 ONNX DLL: $ortDll"
 Write-Host "Bundled ONNX DLL version: $ortVersion"
 
+$privateOrtName = "ctavort.dll"
+$privateOrtName = "ctavort.dll"
+$patchScript = Join-Path $env:RUNNER_TEMP "patch-onnx-import.cjs"
+@'
+const fs = require("node:fs");
+const path = require("node:path");
+const root = process.argv[2];
+const oldName = Buffer.from("onnxruntime.dll", "ascii");
+const newName = Buffer.alloc(oldName.length);
+Buffer.from("ctavort.dll", "ascii").copy(newName);
+let total = 0;
 
+function walk(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      walk(full);
+      continue;
+    }
+    if (!entry.isFile() || ![".node", ".dll"].includes(path.extname(entry.name).toLowerCase())) continue;
+    const bytes = fs.readFileSync(full);
+    let offset = 0;
+    let count = 0;
+    while ((offset = bytes.indexOf(oldName, offset)) !== -1) {
+      newName.copy(bytes, offset);
+      offset += oldName.length;
+      count++;
+    }
+    if (count) {
+      fs.writeFileSync(full, bytes);
+      total += count;
+      process.stdout.write("Patched " + full + ": " + count + " reference(s)\n");
+    }
+  }
+}
+
+walk(root);
+if (total < 1) {
+  process.stderr.write("No native PE import references to onnxruntime.dll were found.\n");
+  process.exit(1);
+}
+process.stdout.write("Total private ONNX import references: " + total + "\n");
+'@ | Set-Content -Path $patchScript -Encoding utf8
+Invoke-Checked "node" @($patchScript, $ortNativeDir) "Patching ONNX native imports to the private DLL name failed."
+$privateOrtDll = Join-Path $ortNativeDir $privateOrtName
+Move-Item -LiteralPath $ortDll -Destination $privateOrtDll -Force
+$ortDll = $privateOrtDll
+Write-Host "Private ONNX DLL name: $privateOrtName (patched $patchedImports import reference(s))"
+$runtimeNativeDir = Join-Path $source "runtime-native"
+New-Item -ItemType Directory -Force -Path $runtimeNativeDir | Out-Null
+Copy-Item -Path (Join-Path $ortNativeDir "*") -Destination $runtimeNativeDir -Recurse -Force
 
 Invoke-Checked "npm" @("install", "--save-dev", "electron", "electron-builder", "--no-audit", "--no-fund") "Installing Electron build tools failed."
 
@@ -196,6 +203,7 @@ $buildConfig = @{
     signAndEditExecutable = $false
   }
   portable = @{ artifactName = "KtavYad-Portable.exe" }
+  extraFiles = @(@{ from = "runtime-native"; to = "." })
 }
 $pkg | Add-Member -NotePropertyName build -NotePropertyValue $buildConfig -Force
 $pkg | ConvertTo-Json -Depth 100 | Set-Content package.json -Encoding utf8
@@ -363,31 +371,21 @@ try {
   node -e "const fs=require('fs');const p='models/mishkefet';const c=JSON.parse(fs.readFileSync(p+'/charset.json','utf8'));if(!Array.isArray(c)||c.length!==198)throw new Error('Unexpected charset');const h=fs.readFileSync(p+'/head.bin');if(h.toString('ascii',0,4)!=='MKH1')throw new Error('Invalid head.bin');for(const f of ['charlm.bin','words.bin','backbone.fp16.onnx'])if(fs.statSync(p+'/'+f).size<1000)throw new Error('Invalid '+f);console.log('Model assets OK; charset='+c.length);"
   if ($LASTEXITCODE -ne 0) { throw "Model asset verification failed." }
 
-  # Explicitly preload the exact app-local ONNX DLL before requiring the native binding.
-  $smokeScript = Join-Path $env:RUNNER_TEMP "smoke-onnx.cjs"
-  @'
-  const path = require("node:path");
-  const koffi = require("koffi");
-  const kernel32 = koffi.load("kernel32.dll");
-  const loadLibraryExW = kernel32.func("__stdcall", "LoadLibraryExW", "void *", ["str16", "void *", "uint32"]);
-  const dllPath = path.resolve(process.argv[2]);
-  const handle = loadLibraryExW(dllPath, null, 0x00000008);
-  if (handle == null) throw new Error("LoadLibraryExW failed for " + dllPath);
-  console.log("Explicitly preloaded ONNX Runtime:", dllPath);
-  const ort = require("onnxruntime-node");
-  ort.InferenceSession.create("models/mishkefet/backbone.fp16.onnx", {
-    executionProviders: ["cpu"],
-    graphOptimizationLevel: "disabled"
-  }).then((session) => {
-    console.log("ONNX model loaded:", session.inputNames[0], "=>", session.outputNames[0]);
-    process.exit(0);
-  }).catch((error) => {
-    console.error(error);
-    process.exit(1);
-  });
-  '@ | Set-Content -Path $smokeScript -Encoding utf8
-  node $smokeScript $standaloneOrtDll
-  if ($LASTEXITCODE -ne 0) { throw "ONNX Runtime could not load the model after explicit full-path DLL preloading." }
+  # Run Node from a clean directory with the package's own DLL beside node.exe.
+  # This reproduces the executable-directory-first DLL lookup used by the packaged Electron app.
+  $smokeNodeDir = Join-Path $env:RUNNER_TEMP "node-with-bundled-ort"
+  New-Item -ItemType Directory -Force -Path $smokeNodeDir | Out-Null
+  $nodeExe = (Get-Command node).Source
+  Copy-Item -LiteralPath $nodeExe -Destination (Join-Path $smokeNodeDir "node.exe") -Force
+  Copy-Item -LiteralPath (Join-Path $runtimeNativeDir "ctavort.dll") -Destination (Join-Path $smokeNodeDir "ctavort.dll") -Force
+
+  $loadedOrtDll = Join-Path $smokeNodeDir "ctavort.dll"
+  $loadedOrtVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($loadedOrtDll).FileVersion
+  Write-Host "Smoke-test executable: $(Join-Path $smokeNodeDir 'node.exe')"
+  Write-Host "Smoke-test ONNX DLL: $loadedOrtVersion"
+
+  & (Join-Path $smokeNodeDir "node.exe") -e "const ort=require('onnxruntime-node');ort.InferenceSession.create('models/mishkefet/backbone.fp16.onnx',{executionProviders:['cpu'],graphOptimizationLevel:'disabled'}).then(s=>{console.log('ONNX model loaded:',s.inputNames[0],'=>',s.outputNames[0]);process.exit(0)}).catch(e=>{console.error(e);process.exit(1)});"
+  if ($LASTEXITCODE -ne 0) { throw "ONNX Runtime could not load the bundled model using the package-matched DLL." }
 
   if (-not (Test-Path "public/tessdata/heb.traineddata")) { throw "Hebrew Tesseract data is missing." }
 
