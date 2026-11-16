@@ -134,7 +134,7 @@ Write-Host "Bundled Windows x64 ONNX DLL: $ortDll"
 Write-Host "Bundled ONNX DLL version: $ortVersion"
 
 $privateOrtName = "ctavort.dll"
-$privateOrtName = "ctavort.dll"
+$ortPackageDir = Join-Path $source "node_modules/onnxruntime-node"
 $patchScript = Join-Path $env:RUNNER_TEMP "patch-onnx-import.cjs"
 @'
 const fs = require("node:fs");
@@ -144,6 +144,7 @@ const oldName = Buffer.from("onnxruntime.dll", "ascii");
 const newName = Buffer.alloc(oldName.length);
 Buffer.from("ctavort.dll", "ascii").copy(newName);
 let total = 0;
+let patchedBindings = 0;
 
 function walk(dir) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -152,7 +153,8 @@ function walk(dir) {
       walk(full);
       continue;
     }
-    if (!entry.isFile() || ![".node", ".dll"].includes(path.extname(entry.name).toLowerCase())) continue;
+    const ext = path.extname(entry.name).toLowerCase();
+    if (!entry.isFile() || ![".node", ".dll"].includes(ext)) continue;
     const bytes = fs.readFileSync(full);
     let offset = 0;
     let count = 0;
@@ -164,23 +166,25 @@ function walk(dir) {
     if (count) {
       fs.writeFileSync(full, bytes);
       total += count;
+      if (ext === ".node") patchedBindings++;
       process.stdout.write("Patched " + full + ": " + count + " reference(s)\n");
     }
   }
 }
 
 walk(root);
-if (total < 1) {
-  process.stderr.write("No native PE import references to onnxruntime.dll were found.\n");
+if (patchedBindings < 1) {
+  process.stderr.write("The onnxruntime-node package binding (.node) was not patched; refusing to continue.\n");
   process.exit(1);
 }
+process.stdout.write("Patched native binding files: " + patchedBindings + "\n");
 process.stdout.write("Total private ONNX import references: " + total + "\n");
 '@ | Set-Content -Path $patchScript -Encoding utf8
-Invoke-Checked "node" @($patchScript, $ortNativeDir) "Patching ONNX native imports to the private DLL name failed."
+Invoke-Checked "node" @($patchScript, $ortPackageDir) "Patching the ONNX package native binding to the private DLL name failed."
 $privateOrtDll = Join-Path $ortNativeDir $privateOrtName
 Move-Item -LiteralPath $ortDll -Destination $privateOrtDll -Force
 $ortDll = $privateOrtDll
-Write-Host "Private ONNX DLL name: $privateOrtName (patched $patchedImports import reference(s))"
+Write-Host "Private ONNX DLL name: $privateOrtName; native .node binding import was patched."
 $runtimeNativeDir = Join-Path $source "runtime-native"
 New-Item -ItemType Directory -Force -Path $runtimeNativeDir | Out-Null
 Copy-Item -Path (Join-Path $ortNativeDir "*") -Destination $runtimeNativeDir -Recurse -Force
@@ -377,7 +381,8 @@ try {
   New-Item -ItemType Directory -Force -Path $smokeNodeDir | Out-Null
   $nodeExe = (Get-Command node).Source
   Copy-Item -LiteralPath $nodeExe -Destination (Join-Path $smokeNodeDir "node.exe") -Force
-  Copy-Item -LiteralPath (Join-Path $runtimeNativeDir "ctavort.dll") -Destination (Join-Path $smokeNodeDir "ctavort.dll") -Force
+  # Copy the complete ONNX native directory so provider/helper DLLs are available too.
+  Copy-Item -Path (Join-Path $runtimeNativeDir "*") -Destination $smokeNodeDir -Recurse -Force
 
   $loadedOrtDll = Join-Path $smokeNodeDir "ctavort.dll"
   $loadedOrtVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($loadedOrtDll).FileVersion
