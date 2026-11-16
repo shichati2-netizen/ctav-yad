@@ -217,242 +217,102 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
-
 let serverProcess = null;
 let mainWindow = null;
 let quitting = false;
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function startupPage() {
-  return "<!doctype html><html lang='he' dir='rtl'><meta charset='utf-8'>" +
-    "<meta name='viewport' content='width=device-width,initial-scale=1'>" +
-    "<title>כתב יד</title><style>" +
-    "html,body{height:100%;margin:0;font-family:Segoe UI,Arial,sans-serif;background:#111827;color:#f8fafc}" +
-    "body{display:grid;place-items:center}.panel{text-align:center;padding:36px;max-width:520px}" +
-    ".mark{font-size:42px;margin-bottom:18px}.title{font-size:25px;font-weight:700}" +
-    ".status{margin-top:18px;color:#cbd5e1;font-size:15px}.spinner{width:28px;height:28px;" +
-    "border:3px solid #475569;border-top-color:#e2e8f0;border-radius:50%;margin:26px auto 0;" +
-    "animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}" +
-    "</style><body><main class='panel'><div class='mark'>✍</div>" +
-    "<div class='title'>כתב יד</div><div id='status' class='status'>מכין את התוכנה להפעלה…</div>" +
-    "<div class='spinner'></div></main></body></html>";
-}
-
-function updateStatus(message) {
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function setStatus(message) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const script = "const e=document.getElementById('status');if(e)e.textContent=" + JSON.stringify(message) + ";";
-  mainWindow.webContents.executeJavaScript(script).catch(() => {});
+  const js = "const e=document.getElementById('status');if(e)e.textContent=" + JSON.stringify(message) + ";";
+  mainWindow.webContents.executeJavaScript(js).catch(() => {});
 }
-
-function resolveDataRoot() {
-  const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
-  if (portableDir) {
-    const portableData = path.join(portableDir, "KtavYad-Data");
-    try {
-      fs.mkdirSync(portableData, { recursive: true });
-      fs.accessSync(portableData, fs.constants.W_OK);
-      return portableData;
-    } catch {}
+function setBelowNormal(pid) {
+  if (!pid || process.platform !== "win32") return;
+  const p = spawn("powershell.exe", ["-NoProfile","-NonInteractive","-Command", "$x=Get-Process -Id $env:CTAV_PID -ErrorAction SilentlyContinue; if($x){try{$x.PriorityClass='BelowNormal'}catch{}}"],
+    { windowsHide:true, stdio:"ignore", env:{...process.env,CTAV_PID:String(pid)} });
+  p.unref();
+}
+function getDataRoot() {
+  const dir = process.env.PORTABLE_EXECUTABLE_DIR;
+  if (dir) {
+    const p = path.join(dir, "KtavYad-Data");
+    try { fs.mkdirSync(p,{recursive:true}); fs.accessSync(p,fs.constants.W_OK); return p; } catch {}
   }
   return path.join(app.getPath("userData"), "data");
 }
-
-function extractRuntimeArchive(archiveFile, stagingDir) {
-  return new Promise((resolve, reject) => {
-    fs.rmSync(stagingDir, { recursive: true, force: true });
-    fs.mkdirSync(stagingDir, { recursive: true });
-
-    const script =
-      "try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch {}; " +
+function extractArchive(zipFile, targetDir) {
+  return new Promise((resolve,reject) => {
+    const tempDir = targetDir + ".tmp";
+    fs.rmSync(tempDir,{recursive:true,force:true});
+    fs.mkdirSync(tempDir,{recursive:true});
+    const ps = "try{(Get-Process -Id $PID).PriorityClass='BelowNormal'}catch{}; " +
       "Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
-      "[System.IO.Compression.ZipFile]::ExtractToDirectory($env:CTAV_APP_ZIP,$env:CTAV_APP_STAGE)";
-    const extractor = spawn("powershell.exe", [
-      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script
-    ], {
-      windowsHide: true,
-      stdio: ["ignore", "ignore", "pipe"],
-      env: {
-        ...process.env,
-        CTAV_APP_ZIP: archiveFile,
-        CTAV_APP_STAGE: stagingDir,
-      },
-    });
-
-    let errorText = "";
-    extractor.stderr.on("data", (chunk) => {
-      if (errorText.length < 8000) errorText += chunk.toString();
-    });
-    extractor.once("error", reject);
-    extractor.once("close", (code) => {
-      if (code !== 0) {
-        fs.rmSync(stagingDir, { recursive: true, force: true });
-        reject(new Error("פריסת קובצי התוכנה נכשלה. " + errorText));
-        return;
-      }
-      if (!fs.existsSync(path.join(stagingDir, "server.js"))) {
-        fs.rmSync(stagingDir, { recursive: true, force: true });
-        reject(new Error("קובץ השרת חסר בארכיון התוכנה."));
-        return;
-      }
-      resolve();
+      "[System.IO.Compression.ZipFile]::ExtractToDirectory($env:CTAV_ZIP,$env:CTAV_TARGET)";
+    const child = spawn("powershell.exe",["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-Command",ps],
+      {windowsHide:true,stdio:["ignore","ignore","pipe"],env:{...process.env,CTAV_ZIP:zipFile,CTAV_TARGET:tempDir}});
+    let err=""; child.stderr.on("data",d=>{if(err.length<6000)err+=d.toString()});
+    child.once("error",reject);
+    child.once("close",code=>{
+      if(code!==0){fs.rmSync(tempDir,{recursive:true,force:true});reject(new Error("Runtime extraction failed: "+err));return}
+      if(!fs.existsSync(path.join(tempDir,"server.js"))){fs.rmSync(tempDir,{recursive:true,force:true});reject(new Error("Runtime archive is missing server.js"));return}
+      try{fs.rmSync(targetDir,{recursive:true,force:true});fs.renameSync(tempDir,targetDir);resolve()}catch(e){reject(e)}
     });
   });
 }
-
-function setServerPriority(pid) {
-  if (process.platform !== "win32" || !pid) return;
-  const helper = spawn("powershell.exe", [
-    "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-    "$p=Get-Process -Id $env:CTAV_SERVER_PID -ErrorAction SilentlyContinue; if($p){try{$p.PriorityClass='BelowNormal'}catch{}}"
-  ], {
-    windowsHide: true,
-    stdio: "ignore",
-    env: { ...process.env, CTAV_SERVER_PID: String(pid) },
-  });
-  helper.unref();
-}
-
 function freePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = address && typeof address === "object" ? address.port : null;
-      server.close((error) => error ? reject(error) : port ? resolve(port) : reject(new Error("Could not allocate a local port")));
-    });
+  return new Promise((resolve,reject)=>{
+    const s=net.createServer(); s.once("error",reject);
+    s.listen(0,"127.0.0.1",()=>{const a=s.address();const p=a&&typeof a==="object"?a.port:null;s.close(e=>e?reject(e):p?resolve(p):reject(new Error("Could not allocate port"))) });
   });
 }
-
-async function waitForServer(url, timeoutMs, logFile) {
-  const end = Date.now() + timeoutMs;
-  let lastError = "server did not respond";
-  while (Date.now() < end) {
-    if (quitting) throw new Error("ההפעלה בוטלה.");
-    if (serverProcess && serverProcess.exitCode !== null) {
-      throw new Error("השרת המקומי נסגר. פרטי התקלה נשמרו כאן: " + logFile);
-    }
-    try {
-      const response = await fetch(url + "/api/health", { signal: AbortSignal.timeout(2500) });
-      if (response.ok) return;
-      lastError = "health check returned HTTP " + response.status;
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-    }
-    await delay(700);
+async function waitForServer(url, logFile) {
+  const end=Date.now()+120000;
+  while(Date.now()<end){
+    if(quitting)throw new Error("ההפעלה בוטלה.");
+    if(serverProcess&&serverProcess.exitCode!==null)throw new Error("השרת המקומי נסגר. יומן: "+logFile);
+    try{const r=await fetch(url+"/api/health",{signal:AbortSignal.timeout(2500)});if(r.ok)return}catch{}
+    await pause(700);
   }
-  throw new Error("השרת המקומי לא עלה בזמן. " + lastError + ". פרטי התקלה: " + logFile);
+  throw new Error("השרת המקומי לא עלה בזמן. יומן: "+logFile);
 }
-
-app.whenReady().then(async () => {
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 900,
-    minWidth: 900,
-    minHeight: 650,
-    show: true,
-    autoHideMenuBar: true,
-    title: "כתב יד",
-    backgroundColor: "#111827",
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
-
-  try {
-    await mainWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(startupPage()));
-    await delay(250);
-
-    const dataRoot = resolveDataRoot();
-    const databaseDir = path.join(dataRoot, "database");
-    const workingDataDir = path.join(dataRoot, "data");
-    const logsDir = path.join(dataRoot, "logs");
-    const runtimeRoot = path.join(dataRoot, "runtime");
-    fs.mkdirSync(databaseDir, { recursive: true });
-    fs.mkdirSync(workingDataDir, { recursive: true });
-    fs.mkdirSync(logsDir, { recursive: true });
-    fs.mkdirSync(runtimeRoot, { recursive: true });
-
-    const buildIdFile = path.join(process.resourcesPath, "app-version.txt");
-    const archiveFile = path.join(process.resourcesPath, "app.zip");
-    if (!fs.existsSync(buildIdFile) || !fs.existsSync(archiveFile)) {
-      throw new Error("קובצי ההפעלה הפנימיים חסרים בחבילת EXE.");
-    }
-    const buildId = fs.readFileSync(buildIdFile, "utf8").trim();
-    if (!/^[A-Za-z0-9._-]{1,128}$/.test(buildId)) {
-      throw new Error("מספר גרסת חבילת התוכנה אינו תקין.");
-    }
-
-    const appRoot = path.join(runtimeRoot, buildId);
-    const serverFile = path.join(appRoot, "server.js");
-    if (!fs.existsSync(serverFile)) {
-      updateStatus("מכין את קובצי התוכנה והמודלים בפעם הראשונה…");
-      const stagingDir = path.join(runtimeRoot, buildId + ".tmp");
-      await extractRuntimeArchive(archiveFile, stagingDir);
-      fs.rmSync(appRoot, { recursive: true, force: true });
-      fs.renameSync(stagingDir, appRoot);
-    }
-
-    if (!fs.existsSync(serverFile)) throw new Error("שרת התוכנה לא נמצא לאחר הפריסה.");
-
-    for (const name of fs.readdirSync(runtimeRoot)) {
-      if (name !== buildId) fs.rmSync(path.join(runtimeRoot, name), { recursive: true, force: true });
-    }
-
-    updateStatus("מפעיל את השרת המקומי ומאתחל את מסד הנתונים…");
-    const port = await freePort();
-    const baseUrl = "http://127.0.0.1:" + port;
-    const logFile = path.join(logsDir, "server.log");
-    const logStream = fs.createWriteStream(logFile, { flags: "a" });
-
-    serverProcess = spawn(process.execPath, [serverFile], {
-      cwd: appRoot,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: "1",
-        NODE_ENV: "production",
-        NEXT_TELEMETRY_DISABLED: "1",
-        HOSTNAME: "127.0.0.1",
-        PORT: String(port),
-        PGLITE_DATA_DIR: databaseDir,
-        DATA_DIR: workingDataDir,
-        DRIZZLE_MIGRATIONS_DIR: path.join(appRoot, "drizzle"),
-        UV_THREADPOOL_SIZE: "2",
-        OMP_NUM_THREADS: "2",
-        OMP_WAIT_POLICY: "PASSIVE",
-        KMP_BLOCKTIME: "0",
-        OPENBLAS_NUM_THREADS: "1",
-        MKL_NUM_THREADS: "1",
-      },
-    });
-    serverProcess.stdout.pipe(logStream);
-    serverProcess.stderr.pipe(logStream);
-    serverProcess.once("error", (error) => logStream.write("\nSERVER SPAWN ERROR: " + error.stack + "\n"));
-    setServerPriority(serverProcess.pid);
-
-    await waitForServer(baseUrl, 120000, logFile);
-    if (quitting || !mainWindow || mainWindow.isDestroyed()) return;
-    updateStatus("השרת מוכן. פותח את סביבת העבודה…");
-    await mainWindow.loadURL(baseUrl);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    updateStatus("ההפעלה נכשלה: " + message);
-    dialog.showErrorBox("כתב יד - שגיאה בהפעלה", message);
-  }
+app.whenReady().then(async()=>{
+  mainWindow=new BrowserWindow({width:1280,height:900,minWidth:900,minHeight:650,show:true,
+    autoHideMenuBar:true,title:"כתב יד",backgroundColor:"#111827",
+    webPreferences:{contextIsolation:true,nodeIntegration:false,sandbox:true}});
+  try{
+    const splash="<!doctype html><html lang='he' dir='rtl'><meta charset='utf-8'><title>כתב יד</title>" +
+      "<style>body{margin:0;height:100vh;display:grid;place-items:center;background:#111827;color:#f8fafc;font-family:Segoe UI,Arial}" +
+      "main{text-align:center}h2{font-size:26px}.muted{color:#cbd5e1}.spin{margin:24px auto;border:3px solid #475569;border-top-color:white;border-radius:50%;width:28px;height:28px;animation:s 1s linear infinite}" +
+      "@keyframes s{to{transform:rotate(360deg)}}</style><main><h2>כתב יד</h2><div id='status' class='muted'>מכין את התוכנה להפעלה…</div><div class='spin'></div></main></html>";
+    await mainWindow.loadURL("data:text/html;charset=utf-8,"+encodeURIComponent(splash));
+    await pause(250);
+    const dataRoot=getDataRoot();
+    const dbDir=path.join(dataRoot,"database"), dataDir=path.join(dataRoot,"data"), logsDir=path.join(dataRoot,"logs"), runtimeRoot=path.join(dataRoot,"runtime");
+    for(const d of [dbDir,dataDir,logsDir,runtimeRoot])fs.mkdirSync(d,{recursive:true});
+    const versionFile=path.join(process.resourcesPath,"app-version.txt"), zipFile=path.join(process.resourcesPath,"app.zip");
+    if(!fs.existsSync(versionFile)||!fs.existsSync(zipFile))throw new Error("קובצי ההפעלה הפנימיים חסרים.");
+    const buildId=fs.readFileSync(versionFile,"utf8").trim();
+    if(!/^[A-Za-z0-9._-]{1,128}$/.test(buildId))throw new Error("גרסת התוכנה אינה תקינה.");
+    const appRoot=path.join(runtimeRoot,buildId), serverFile=path.join(appRoot,"server.js");
+    if(!fs.existsSync(serverFile)){setStatus("מכין קובצי תוכנה ומודלים בפעם הראשונה…");await extractArchive(zipFile,appRoot);}
+    if(!fs.existsSync(serverFile))throw new Error("שרת התוכנה חסר לאחר הפריסה.");
+    for(const name of fs.readdirSync(runtimeRoot)){if(name.endsWith(".tmp"))fs.rmSync(path.join(runtimeRoot,name),{recursive:true,force:true});}
+    setStatus("מפעיל את השרת המקומי ומאתחל את מסד הנתונים…");
+    const port=await freePort(), baseUrl="http://127.0.0.1:"+port, logFile=path.join(logsDir,"server.log"), log=fs.createWriteStream(logFile,{flags:"a"});
+    serverProcess=spawn(process.execPath,[serverFile],{cwd:appRoot,windowsHide:true,stdio:["ignore","pipe","pipe"],env:{
+      ...process.env,ELECTRON_RUN_AS_NODE:"1",NODE_ENV:"production",NEXT_TELEMETRY_DISABLED:"1",HOSTNAME:"127.0.0.1",PORT:String(port),
+      PGLITE_DATA_DIR:dbDir,DATA_DIR:dataDir,DRIZZLE_MIGRATIONS_DIR:path.join(appRoot,"drizzle"),
+      UV_THREADPOOL_SIZE:"2",OMP_NUM_THREADS:"2",OMP_WAIT_POLICY:"PASSIVE",KMP_BLOCKTIME:"0",OPENBLAS_NUM_THREADS:"1",MKL_NUM_THREADS:"1"
+    }});
+    serverProcess.stdout.pipe(log);serverProcess.stderr.pipe(log);
+    serverProcess.once("error",e=>log.write("\nSERVER SPAWN ERROR: "+e.stack+"\n"));
+    setBelowNormal(serverProcess.pid);
+    await waitForServer(baseUrl,logFile);
+    if(!quitting&&mainWindow&&!mainWindow.isDestroyed())await mainWindow.loadURL(baseUrl);
+  }catch(e){const message=e instanceof Error?e.message:String(e);setStatus("ההפעלה נכשלה: "+message);dialog.showErrorBox("כתב יד - שגיאה בהפעלה",message)}
 });
-
-app.on("before-quit", () => {
-  quitting = true;
-  if (serverProcess && serverProcess.exitCode === null) serverProcess.kill();
-});
-app.on("window-all-closed", () => app.quit());
+app.on("before-quit",()=>{quitting=true;if(serverProcess&&serverProcess.exitCode===null)serverProcess.kill()});
+app.on("window-all-closed",()=>app.quit());
 '@ | Set-Content -Path (Join-Path $source "electron-main.cjs") -Encoding utf8
 
 $env:CTAV_BUILD_MODE = "1"
@@ -482,101 +342,22 @@ if (-not (Test-Path $standaloneOrtDll)) {
   throw "The matching ONNX native DLL was not copied into the Next.js standalone package: $ortRelativePath"
 }
 
-# Keep the portable EXE's first-stage extraction small: ship the full server tree
-# and all models as one archive, then expand it only after the splash window is visible.
+# Package the runtime tree as one file so the portable wrapper does not expand thousands of files at launch.
 $buildId = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { [System.Guid]::NewGuid().ToString("N") }
-if ($buildId -notmatch '^[A-Za-z0-9._-]{1,128}
-Push-Location $standalone
-try {
-  node -e "const fs=require('fs');const p='models/mishkefet';const c=JSON.parse(fs.readFileSync(p+'/charset.json','utf8'));if(!Array.isArray(c)||c.length!==198)throw new Error('Unexpected charset');const h=fs.readFileSync(p+'/head.bin');if(h.toString('ascii',0,4)!=='MKH1')throw new Error('Invalid head.bin');for(const f of ['charlm.bin','words.bin','backbone.fp16.onnx'])if(fs.statSync(p+'/'+f).size<1000)throw new Error('Invalid '+f);console.log('Model assets OK; charset='+c.length);"
-  if ($LASTEXITCODE -ne 0) { throw "Model asset verification failed." }
-
-  # Run Node from a clean directory with the package's own DLL beside node.exe.
-  # This reproduces the executable-directory-first DLL lookup used by the packaged Electron app.
-  $smokeNodeDir = Join-Path $env:RUNNER_TEMP "node-with-bundled-ort"
-  New-Item -ItemType Directory -Force -Path $smokeNodeDir | Out-Null
-  $nodeExe = (Get-Command node).Source
-  Copy-Item -LiteralPath $nodeExe -Destination (Join-Path $smokeNodeDir "node.exe") -Force
-  Copy-Item -LiteralPath (Join-Path $runtimeNativeDir "ctavort.dll") -Destination (Join-Path $smokeNodeDir "ctavort.dll") -Force
-
-  $loadedOrtDll = Join-Path $smokeNodeDir "ctavort.dll"
-  $loadedOrtVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($loadedOrtDll).FileVersion
-  Write-Host "Smoke-test executable: $(Join-Path $smokeNodeDir 'node.exe')"
-  Write-Host "Smoke-test ONNX DLL: $loadedOrtVersion"
-
-  & (Join-Path $smokeNodeDir "node.exe") -e "const ort=require('onnxruntime-node');ort.InferenceSession.create('models/mishkefet/backbone.fp16.onnx',{executionProviders:['cpu'],graphOptimizationLevel:'disabled'}).then(s=>{console.log('ONNX model loaded:',s.inputNames[0],'=>',s.outputNames[0]);process.exit(0)}).catch(e=>{console.error(e);process.exit(1)});"
-  if ($LASTEXITCODE -ne 0) { throw "ONNX Runtime could not load the bundled model using the package-matched DLL." }
-
-  if (-not (Test-Path "public/tessdata/heb.traineddata")) { throw "Hebrew Tesseract data is missing." }
-
-  # Start the standalone server once to verify migrations and the embedded local database.
-  $env:CTAV_BUILD_MODE = ""
-  $env:PGLITE_DATA_DIR = Join-Path $env:RUNNER_TEMP "ctav-yad-smoke-db"
-  $env:DATA_DIR = Join-Path $env:RUNNER_TEMP "ctav-yad-smoke-data"
-  $env:PORT = "32191"
-  $env:HOSTNAME = "127.0.0.1"
-  $stdout = Join-Path $env:RUNNER_TEMP "ctav-server-out.log"
-  $stderr = Join-Path $env:RUNNER_TEMP "ctav-server-err.log"
-  $proc = Start-Process -FilePath (Get-Command node).Source -ArgumentList @("server.js") -WorkingDirectory $standalone -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-  try {
-    $ready = $false
-    for ($i = 0; $i -lt 120; $i++) {
-      if ($proc.HasExited) { break }
-      try {
-        $response = Invoke-WebRequest -Uri "http://127.0.0.1:32191/api/health" -TimeoutSec 3
-        if ($response.StatusCode -eq 200) { $ready = $true; break }
-      } catch {}
-      Start-Sleep -Seconds 1
-    }
-    if (-not $ready) {
-      if (Test-Path $stdout) { Get-Content $stdout | Write-Host }
-      if (Test-Path $stderr) { Get-Content $stderr | Write-Host }
-      throw "Portable server did not become healthy. See logs above."
-    }
-    Write-Host "Standalone app and embedded PostgreSQL-compatible database passed the health check."
-  } finally {
-    if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
-  }
-} finally {
-  Pop-Location
-}
-
-# Electron-builder's portable target is a single self-extracting Windows EXE.
-Set-Location $source
-Invoke-Checked "npx" @("electron-builder", "--win", "portable", "--x64") "electron-builder failed."
-$builtExe = Get-ChildItem (Join-Path $source "dist-electron") -Filter "*.exe" -File | Select-Object -First 1
-if (-not $builtExe) { throw "Portable EXE was not produced." }
-
-$dist = Join-Path $env:GITHUB_WORKSPACE "dist"
-New-Item -ItemType Directory -Force -Path $dist | Out-Null
-$finalExe = Join-Path $dist "KtavYad-Portable.exe"
-Copy-Item -LiteralPath $builtExe.FullName -Destination $finalExe -Force
-Write-Host "PORTABLE EXE: $finalExe"
-Write-Host "SIZE_BYTES: $((Get-Item $finalExe).Length)"
-) { throw "Invalid build identifier for runtime cache." }
+if ($buildId -notmatch '^[A-Za-z0-9._-]{1,128}$') { throw "Invalid runtime build identifier." }
 $appArchive = Join-Path $source "runtime-app.zip"
 $appVersionFile = Join-Path $source "runtime-app-version.txt"
 if (Test-Path $appArchive) { Remove-Item -LiteralPath $appArchive -Force }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory(
-  $standalone,
-  $appArchive,
-  [System.IO.Compression.CompressionLevel]::Fastest,
-  $false
-)
+[System.IO.Compression.ZipFile]::CreateFromDirectory($standalone, $appArchive, [System.IO.Compression.CompressionLevel]::Fastest, $false)
 Set-Content -Path $appVersionFile -Value $buildId -Encoding ascii
 $archiveCheck = [System.IO.Compression.ZipFile]::OpenRead($appArchive)
 try {
-  $requiredEntries = @("server.js", "models/mishkefet/backbone.fp16.onnx", "drizzle/meta/_journal.json")
-  foreach ($entryName in $requiredEntries) {
-    if (-not ($archiveCheck.Entries | Where-Object { $_.FullName -eq $entryName })) {
-      throw "Runtime archive is missing required entry: $entryName"
-    }
+  foreach ($required in @("server.js", "models/mishkefet/backbone.fp16.onnx", "drizzle/meta/_journal.json")) {
+    if (-not ($archiveCheck.Entries | Where-Object { $_.FullName -eq $required })) { throw "Runtime archive is missing: $required" }
   }
-} finally {
-  $archiveCheck.Dispose()
-}
-Write-Host "Runtime archive created: $([math]::Round((Get-Item $appArchive).Length / 1MB, 1)) MB"
+} finally { $archiveCheck.Dispose() }
+Write-Host "Runtime archive size: $([math]::Round((Get-Item $appArchive).Length / 1MB, 1)) MB"
 
 # Validate model files and load the ONNX graph with the Windows native runtime.
 Push-Location $standalone
