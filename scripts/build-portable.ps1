@@ -230,7 +230,7 @@ Copy-Item -Path (Join-Path $ortNativeDir "*") -Destination $runtimeNativeDir -Re
 
 Invoke-Checked "npm" @("install", "--save-dev", "electron", "electron-builder", "--no-audit", "--no-fund") "Installing Electron build tools failed."
 
-# The Electron launcher is deliberately small; the actual app and all models are placed in resources/app.
+# The Electron launcher is small; the complete unpacked app is stored in resources/app.
 $pkg = Get-Content package.json -Raw | ConvertFrom-Json
 if (-not $pkg.version) { $pkg | Add-Member -NotePropertyName version -NotePropertyValue "1.0.0" -Force }
 $pkg | Add-Member -NotePropertyName main -NotePropertyValue "electron-main.cjs" -Force
@@ -241,8 +241,7 @@ $buildConfig = @{
   directories = @{ output = "dist-electron" }
   files = @("electron-main.cjs", "package.json")
   extraResources = @(
-    @{ from = "runtime-app.zip"; to = "app.zip" },
-    @{ from = "runtime-app-version.txt"; to = "app-version.txt" }
+    @{ from = ".next/standalone"; to = "app" }
   )
   win = @{
     signAndEditExecutable = $false
@@ -281,25 +280,6 @@ function getDataRoot() {
   }
   return path.join(app.getPath("userData"), "data");
 }
-function extractArchive(zipFile, targetDir) {
-  return new Promise((resolve,reject) => {
-    const tempDir = targetDir + ".tmp";
-    fs.rmSync(tempDir,{recursive:true,force:true});
-    fs.mkdirSync(tempDir,{recursive:true});
-    const ps = "try{(Get-Process -Id $PID).PriorityClass='BelowNormal'}catch{}; " +
-      "Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
-      "[System.IO.Compression.ZipFile]::ExtractToDirectory($env:CTAV_ZIP,$env:CTAV_TARGET)";
-    const child = spawn("powershell.exe",["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-Command",ps],
-      {windowsHide:true,stdio:["ignore","ignore","pipe"],env:{...process.env,CTAV_ZIP:zipFile,CTAV_TARGET:tempDir}});
-    let err=""; child.stderr.on("data",d=>{if(err.length<6000)err+=d.toString()});
-    child.once("error",reject);
-    child.once("close",code=>{
-      if(code!==0){fs.rmSync(tempDir,{recursive:true,force:true});reject(new Error("Runtime extraction failed: "+err));return}
-      if(!fs.existsSync(path.join(tempDir,"server.js"))){fs.rmSync(tempDir,{recursive:true,force:true});reject(new Error("Runtime archive is missing server.js"));return}
-      try{fs.rmSync(targetDir,{recursive:true,force:true});fs.renameSync(tempDir,targetDir);resolve()}catch(e){reject(e)}
-    });
-  });
-}
 function freePort() {
   return new Promise((resolve,reject)=>{
     const s=net.createServer(); s.once("error",reject);
@@ -328,17 +308,12 @@ app.whenReady().then(async()=>{
     await mainWindow.loadURL("data:text/html;charset=utf-8,"+encodeURIComponent(splash));
     await pause(250);
     const dataRoot=getDataRoot();
-    const dbDir=path.join(dataRoot,"database"), dataDir=path.join(dataRoot,"data"), logsDir=path.join(dataRoot,"logs"), runtimeRoot=path.join(dataRoot,"runtime");
-    for(const d of [dbDir,dataDir,logsDir,runtimeRoot])fs.mkdirSync(d,{recursive:true});
-    const versionFile=path.join(process.resourcesPath,"app-version.txt"), zipFile=path.join(process.resourcesPath,"app.zip");
-    if(!fs.existsSync(versionFile)||!fs.existsSync(zipFile))throw new Error("קובצי ההפעלה הפנימיים חסרים.");
-    const buildId=fs.readFileSync(versionFile,"utf8").trim();
-    if(!/^[A-Za-z0-9._-]{1,128}$/.test(buildId))throw new Error("גרסת התוכנה אינה תקינה.");
-    const appRoot=path.join(runtimeRoot,buildId), serverFile=path.join(appRoot,"server.js");
-    if(!fs.existsSync(serverFile)){setStatus("מכין קובצי תוכנה ומודלים בפעם הראשונה…");await extractArchive(zipFile,appRoot);}
-    if(!fs.existsSync(serverFile))throw new Error("שרת התוכנה חסר לאחר הפריסה.");
-    for(const name of fs.readdirSync(runtimeRoot)){if(name.endsWith(".tmp"))fs.rmSync(path.join(runtimeRoot,name),{recursive:true,force:true});}
-    setStatus("מפעיל את השרת המקומי ומאתחל את מסד הנתונים…");
+    const dbDir=path.join(dataRoot,"database"), dataDir=path.join(dataRoot,"data"), logsDir=path.join(dataRoot,"logs");
+    for(const d of [dbDir,dataDir,logsDir])fs.mkdirSync(d,{recursive:true});
+    const appRoot=path.join(process.resourcesPath,"app");
+    const serverFile=path.join(appRoot,"server.js");
+    if(!fs.existsSync(serverFile))throw new Error("קובצי השרת חסרים בתיקיית resources/app.");
+    setStatus("הממשק מוכן. מפעיל את השרת המקומי…");
     const port=await freePort(), baseUrl="http://127.0.0.1:"+port, logFile=path.join(logsDir,"server.log"), log=fs.createWriteStream(logFile,{flags:"a"});
     serverProcess=spawn(process.execPath,[serverFile],{cwd:appRoot,windowsHide:true,stdio:["ignore","pipe","pipe"],env:{
       ...process.env,ELECTRON_RUN_AS_NODE:"1",NODE_ENV:"production",NEXT_TELEMETRY_DISABLED:"1",HOSTNAME:"127.0.0.1",PORT:String(port),
@@ -518,28 +493,7 @@ if (-not (Test-Path $standaloneOrtDll)) {
   throw "The matching ONNX native DLL was not copied into the Next.js standalone package: $ortRelativePath"
 }
 
-# Package the runtime tree as one file so the portable wrapper does not expand thousands of files at launch.
-$buildId = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { [System.Guid]::NewGuid().ToString("N") }
-if ($buildId -notmatch '^[A-Za-z0-9._-]{1,128}$') { throw "Invalid runtime build identifier." }
-$appArchive = Join-Path $source "runtime-app.zip"
-$appVersionFile = Join-Path $source "runtime-app-version.txt"
-if (Test-Path $appArchive) { Remove-Item -LiteralPath $appArchive -Force }
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory($standalone, $appArchive, [System.IO.Compression.CompressionLevel]::Fastest, $false)
-Set-Content -Path $appVersionFile -Value $buildId -Encoding ascii
-$archiveCheck = [System.IO.Compression.ZipFile]::OpenRead($appArchive)
-try {
-  foreach ($required in @("server.js", "models/mishkefet/charset.json", "models/mishkefet/charlm.bin", "models/mishkefet/words.bin", "models/mishkefet/head.bin", "public/tessdata/heb.traineddata", "drizzle/meta/_journal.json")) {
-    if (-not ($archiveCheck.Entries | Where-Object { $_.FullName -eq $required })) { throw "Runtime archive is missing: $required" }
-  }
-} finally { $archiveCheck.Dispose() }
-$verifyArchive = [System.IO.Compression.ZipFile]::OpenRead($appArchive)
-try {
-  if ($verifyArchive.Entries | Where-Object { $_.FullName.EndsWith(".onnx", [System.StringComparison]::OrdinalIgnoreCase) }) {
-    throw "A large ONNX model was unexpectedly included in the runtime archive."
-  }
-} finally { $verifyArchive.Dispose() }
-Write-Host "Runtime archive size (external ONNX model excluded): $([math]::Round((Get-Item $appArchive).Length / 1MB, 1)) MB"
+# The standalone server is copied directly into resources/app; no runtime extraction is needed.
 
 # Validate model files and load the ONNX graph with the Windows native runtime.
 Push-Location $standalone
