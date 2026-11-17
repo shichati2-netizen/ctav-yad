@@ -12,21 +12,18 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect model and Tesseract runtime paths
+      - name: Inspect runtime source and startup UI
         shell: pwsh
         run: |
           $archive = Get-ChildItem -Filter '*.zip' -File | Select-Object -First 1
           $dest = Join-Path $env:RUNNER_TEMP 'ctav-yad-src'
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath $dest -Force
-          Write-Host '===== MODEL FILES ====='
-          Get-ChildItem (Join-Path $dest 'models') -Recurse -File | Select-Object FullName,Length | Format-Table -AutoSize | Out-String | Write-Host
-          Write-Host '===== RELEVANT SOURCE REFERENCES ====='
-          Get-ChildItem (Join-Path $dest 'src') -Recurse -File -Include *.ts,*.tsx,*.js,*.jsx | Select-String -Pattern 'charset.json|backbone.fp16|Mishkefet|tessdata|traineddata|process.cwd|process.resourcesPath|publicDir|public/' -Context 2,3 |
-            ForEach-Object { Write-Host ('FILE: ' + $_.Path + ':' + $_.LineNumber); Write-Host $_.Context.PreContext; Write-Host $_.Line; Write-Host $_.Context.PostContext }
-          foreach ($relative in @('src/lib/dataset.ts','src/lib/mishkefet/engine.ts','src/app/api/ocr/route.ts','src/app/api/recognize/route.ts','src/instrumentation.ts','next.config.ts')) {
+          foreach ($relative in @('src/app/page.tsx','src/app/api/model/route.ts','src/lib/mishkefet/engine.ts','src/components/TranscriberApp.tsx','src/app/layout.tsx')) {
             $path = Join-Path $dest $relative
             if (Test-Path $path) {
               Write-Host ('===== FILE: ' + $relative + ' =====')
               Get-Content -Raw $path | Write-Host
+            } else {
+              Write-Host ('===== MISSING: ' + $relative + ' =====')
             }
           }
