@@ -32,6 +32,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: KtavYad-Windows-Portable
-          path: dist/KtavYad-Portable.exe
+          path: |
+            dist/KtavYad-Portable.exe
+            dist/README-Model.txt
           if-no-files-found: error
           retention-days: 30
