@@ -339,6 +339,7 @@ app.on("window-all-closed",()=>app.quit());
 
 $componentFile = Join-Path $source "src/components/TranscriberApp.tsx"
 $componentText = Get-Content -Path $componentFile -Raw
+$componentText = $componentText.Replace("`r`n", "`n")
 $stateOld = '  const [useOcr, setUseOcr] = useState(true);'
 $stateNew = @'
   const [useOcr, setUseOcr] = useState(true);
@@ -411,8 +412,10 @@ $effectsNew = @'
     };
   }, []);
 '@
-if (-not $componentText.Contains($effectsOld)) { throw "Could not find TranscriberApp initialization effects." }
-$componentText = $componentText.Replace($effectsOld, $effectsNew)
+$effectsPattern = 'useEffect\(\(\) => \{\s*void refreshAdapt\(\);\s*void refreshDocs\(\);\s*\},\s*\[refreshAdapt,\s*refreshDocs\]\);'
+$effectsRegex = [regex]::new($effectsPattern)
+if (-not $effectsRegex.IsMatch($componentText)) { throw "Could not find TranscriberApp initialization effects (line-ending independent match)." }
+$componentText = $effectsRegex.Replace($componentText, $effectsNew.Trim(), 1)
 
 $bannerAnchor = @'
       </header>
@@ -462,8 +465,12 @@ $bannerMarkup = @'
 
       {trainingRunning && adapt && (
 '@
-if (-not $componentText.Contains($bannerAnchor)) { throw "Could not find TranscriberApp header insertion point." }
-$componentText = $componentText.Replace($bannerAnchor, $bannerMarkup)
+$bannerPattern = '</header>\s*\{trainingRunning\s*&&\s*adapt\s*&&\s*\('
+$bannerRegex = [regex]::new($bannerPattern)
+if (-not $bannerRegex.IsMatch($componentText)) { throw "Could not find TranscriberApp header insertion point (line-ending independent match)." }
+$bannerContent = [regex]::Replace($bannerMarkup, '^\s*</header>\s*', '').TrimEnd()
+$bannerReplacement = "</header>`n`n" + $bannerContent + "`n`n      {trainingRunning && adapt && ("
+$componentText = $bannerRegex.Replace($componentText, $bannerReplacement, 1)
 Set-Content -Path $componentFile -Value $componentText -Encoding utf8
 
 $env:CTAV_BUILD_MODE = "1"
