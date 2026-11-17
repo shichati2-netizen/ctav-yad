@@ -14,11 +14,11 @@ New-Item -ItemType Directory -Force -Path $source | Out-Null
 Expand-Archive -LiteralPath $archive.FullName -DestinationPath $source -Force
 Write-Host "Extracted source archive: $($archive.Name)"
 
-# Download the exact ONNX model assets used by the application code.
+# Download only small Mishkefet support files. The large ONNX graph is supplied beside the portable EXE.
 $modelDir = Join-Path $source "models/mishkefet"
 New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
 $modelBase = "https://huggingface.co/itayinbar/Mishkefet-v1/resolve/main/onnx"
-$assets = @("backbone.fp16.onnx", "charlm.bin", "words.bin", "head.bin", "charset.json")
+$assets = @("charlm.bin", "words.bin", "head.bin", "charset.json")
 foreach ($name in $assets) {
   $target = Join-Path $modelDir $name
   Write-Host "Downloading model asset: $name"
@@ -88,8 +88,21 @@ $engineFile = Join-Path $source "src/lib/mishkefet/engine.ts"
 $engineText = Get-Content -Path $engineFile -Raw
 $headOld = 'export const HEADS_DIR = path.join(process.cwd(), "data", "heads");'
 $headNew = 'export const HEADS_DIR = path.join(process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(process.cwd(), "data"), "heads");'
+$modelDirOld = 'export const MODEL_DIR = path.join(process.cwd(), "models", "mishkefet");'
+$modelDirNew = 'export const MODEL_DIR = path.join(process.cwd(), "models", "mishkefet");'
+$onnxOld = 'const session = await ort.InferenceSession.create(path.join(MODEL_DIR, "backbone.fp16.onnx"), {'
+$onnxNew = 'export const ONNX_MODEL_PATH = process.env.MISHKEFET_ONNX_PATH ? path.resolve(process.env.MISHKEFET_ONNX_PATH) : path.join(MODEL_DIR, "backbone.fp16.onnx"); const session = await ort.InferenceSession.create(ONNX_MODEL_PATH, {'
+$loadCoreOld = 'async function loadCore(): Promise<Core> {'
+$loadCoreNew = 'async function loadCore(): Promise<Core> { if (!fs.existsSync(ONNX_MODEL_PATH)) throw new Error("קובץ backbone.fp16.onnx חסר. יש להעתיק אותו לתיקייה models/mishkefet ליד קובץ התוכנה. נתיב נבדק: " + ONNX_MODEL_PATH);'
 if (-not $engineText.Contains($headOld)) { throw "Could not locate HEADS_DIR declaration in engine.ts." }
-Set-Content -Path $engineFile -Value $engineText.Replace($headOld, $headNew) -Encoding utf8
+if (-not $engineText.Contains($modelDirOld)) { throw "Could not locate MODEL_DIR declaration in engine.ts." }
+if (-not $engineText.Contains($onnxOld)) { throw "Could not locate ONNX model loading expression in engine.ts." }
+if (-not $engineText.Contains($loadCoreOld)) { throw "Could not locate loadCore() in engine.ts." }
+$engineText = $engineText.Replace($headOld, $headNew)
+$engineText = $engineText.Replace($modelDirOld, $modelDirNew)
+$engineText = $engineText.Replace($onnxOld, $onnxNew)
+$engineText = $engineText.Replace($loadCoreOld, $loadCoreNew)
+Set-Content -Path $engineFile -Value $engineText -Encoding utf8
 
 # Configure Next.js file tracing and generate PostgreSQL-compatible schema migrations.
 $nextConfigFile = Join-Path $source "next.config.ts"
@@ -302,6 +315,12 @@ app.whenReady().then(async()=>{
     serverProcess=spawn(process.execPath,[serverFile],{cwd:appRoot,windowsHide:true,stdio:["ignore","pipe","pipe"],env:{
       ...process.env,ELECTRON_RUN_AS_NODE:"1",NODE_ENV:"production",NEXT_TELEMETRY_DISABLED:"1",HOSTNAME:"127.0.0.1",PORT:String(port),
       PGLITE_DATA_DIR:dbDir,DATA_DIR:dataDir,DRIZZLE_MIGRATIONS_DIR:path.join(appRoot,"drizzle"),
+      MISHKEFET_ONNX_PATH: (() => {
+        const exeDir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath);
+        const nested = path.join(exeDir,"models","mishkefet","backbone.fp16.onnx");
+        const flat = path.join(exeDir,"backbone.fp16.onnx");
+        return fs.existsSync(nested) ? nested : fs.existsSync(flat) ? flat : nested;
+      })(),
       UV_THREADPOOL_SIZE:"2",OMP_NUM_THREADS:"2",OMP_WAIT_POLICY:"PASSIVE",KMP_BLOCKTIME:"0",OPENBLAS_NUM_THREADS:"1",MKL_NUM_THREADS:"1"
     }});
     serverProcess.stdout.pipe(log);serverProcess.stderr.pipe(log);
@@ -353,11 +372,116 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 Set-Content -Path $appVersionFile -Value $buildId -Encoding ascii
 $archiveCheck = [System.IO.Compression.ZipFile]::OpenRead($appArchive)
 try {
-  foreach ($required in @("server.js", "models/mishkefet/backbone.fp16.onnx", "drizzle/meta/_journal.json")) {
+  foreach ($required in @("server.js", "models/mishkefet/charset.json", "models/mishkefet/charlm.bin", "models/mishkefet/words.bin", "models/mishkefet/head.bin", "public/tessdata/heb.traineddata", "drizzle/meta/_journal.json")) {
     if (-not ($archiveCheck.Entries | Where-Object { $_.FullName -eq $required })) { throw "Runtime archive is missing: $required" }
   }
 } finally { $archiveCheck.Dispose() }
-Write-Host "Runtime archive size: $([math]::Round((Get-Item $appArchive).Length / 1MB, 1)) MB"
+$verifyArchive = [System.IO.Compression.ZipFile]::OpenRead($appArchive)
+try {
+  if ($verifyArchive.Entries | Where-Object { $_.FullName -match '\.onnx
+
+# Validate model files and load the ONNX graph with the Windows native runtime.
+Push-Location $standalone
+try {
+  node -e "const fs=require('fs');const p='models/mishkefet';const c=JSON.parse(fs.readFileSync(p+'/charset.json','utf8'));if(!Array.isArray(c)||c.length!==198)throw new Error('Unexpected charset');const h=fs.readFileSync(p+'/head.bin');if(h.toString('ascii',0,4)!=='MKH1')throw new Error('Invalid head.bin');for(const f of ['charlm.bin','words.bin'])if(fs.statSync(p+'/'+f).size<1000)throw new Error('Invalid '+f);if(fs.existsSync(p+'/backbone.fp16.onnx'))throw new Error('ONNX model should not be bundled');console.log('Model support assets OK; charset='+c.length+'; ONNX graph excluded');"
+  if ($LASTEXITCODE -ne 0) { throw "Model asset verification failed." }
+
+  # Run Node from a clean directory with the package's own DLL beside node.exe.
+  # This reproduces the executable-directory-first DLL lookup used by the packaged Electron app.
+  $smokeNodeDir = Join-Path $env:RUNNER_TEMP "node-with-bundled-ort"
+  New-Item -ItemType Directory -Force -Path $smokeNodeDir | Out-Null
+  $nodeExe = (Get-Command node).Source
+  Copy-Item -LiteralPath $nodeExe -Destination (Join-Path $smokeNodeDir "node.exe") -Force
+  Copy-Item -LiteralPath (Join-Path $runtimeNativeDir "ctavort.dll") -Destination (Join-Path $smokeNodeDir "ctavort.dll") -Force
+
+  $loadedOrtDll = Join-Path $smokeNodeDir "ctavort.dll"
+  $loadedOrtVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($loadedOrtDll).FileVersion
+  Write-Host "Smoke-test executable: $(Join-Path $smokeNodeDir 'node.exe')"
+  Write-Host "Smoke-test ONNX DLL: $loadedOrtVersion"
+
+  & (Join-Path $smokeNodeDir "node.exe") -e "const ort=require('onnxruntime-node');if(!ort.InferenceSession||typeof ort.InferenceSession.create!=='function')throw new Error('ONNX binding unavailable');console.log('ONNX native binding loaded; graph supplied externally.');"
+  if ($LASTEXITCODE -ne 0) { throw "ONNX Runtime native binding could not load using the package-matched DLL." }
+
+  if (-not (Test-Path "public/tessdata/heb.traineddata")) { throw "Hebrew Tesseract data is missing." }
+
+  # Start the standalone server once to verify migrations and the embedded local database.
+  $env:CTAV_BUILD_MODE = ""
+  $env:PGLITE_DATA_DIR = Join-Path $env:RUNNER_TEMP "ctav-yad-smoke-db"
+  $env:DATA_DIR = Join-Path $env:RUNNER_TEMP "ctav-yad-smoke-data"
+  $env:PORT = "32191"
+  $env:HOSTNAME = "127.0.0.1"
+  $stdout = Join-Path $env:RUNNER_TEMP "ctav-server-out.log"
+  $stderr = Join-Path $env:RUNNER_TEMP "ctav-server-err.log"
+  $proc = Start-Process -FilePath (Get-Command node).Source -ArgumentList @("server.js") -WorkingDirectory $standalone -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+  try {
+    $ready = $false
+    for ($i = 0; $i -lt 120; $i++) {
+      if ($proc.HasExited) { break }
+      try {
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:32191/api/health" -TimeoutSec 3
+        if ($response.StatusCode -eq 200) { $ready = $true; break }
+      } catch {}
+      Start-Sleep -Seconds 1
+    }
+    if (-not $ready) {
+      if (Test-Path $stdout) { Get-Content $stdout | Write-Host }
+      if (Test-Path $stderr) { Get-Content $stderr | Write-Host }
+      throw "Portable server did not become healthy. See logs above."
+    }
+    $baseUrl = "http://127.0.0.1:32191"
+    $home = Invoke-WebRequest -Uri "$baseUrl/" -TimeoutSec 20
+    if ($home.StatusCode -ne 200) { throw "Packaged homepage did not return HTTP 200." }
+    $chunkRoot = Join-Path $standalone ".next/static/chunks"
+    if (-not (Test-Path $chunkRoot)) { throw "Next.js static chunks folder is missing." }
+    $chunkFiles = @(Get-ChildItem $chunkRoot -Recurse -File -Filter "*.js")
+    if ($chunkFiles.Count -lt 1) { throw "No Next.js JavaScript chunks were produced." }
+    foreach ($chunk in $chunkFiles) {
+      $relative = $chunk.FullName.Substring($chunkRoot.Length).TrimStart([char[]]"\/").Replace("\","/")
+      $chunkResponse = Invoke-WebRequest -Uri "$baseUrl/_next/static/chunks/$relative" -TimeoutSec 20
+      if ($chunkResponse.StatusCode -ne 200) { throw "Static JS chunk failed: $relative" }
+    }
+    foreach ($asset in @("tesseract/worker.min.js","tessdata/heb.traineddata")) {
+      $assetPath = Join-Path (Join-Path $standalone "public") ($asset.Replace("/","\"))
+      if (Test-Path $assetPath) {
+        $assetResponse = Invoke-WebRequest -Uri "$baseUrl/$asset" -TimeoutSec 30
+        if ($assetResponse.StatusCode -ne 200) { throw "OCR public asset failed: $asset" }
+      }
+    }
+    Write-Host "Standalone app, database, homepage, $($chunkFiles.Count) JS chunks and OCR static assets passed."
+  } finally {
+    if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+  }
+} finally {
+  Pop-Location
+}
+
+# Electron-builder's portable target is a single self-extracting Windows EXE.
+Set-Location $source
+Invoke-Checked "npx" @("electron-builder", "--win", "portable", "--x64") "electron-builder failed."
+$builtExe = Get-ChildItem (Join-Path $source "dist-electron") -Filter "*.exe" -File | Select-Object -First 1
+if (-not $builtExe) { throw "Portable EXE was not produced." }
+
+$dist = Join-Path $env:GITHUB_WORKSPACE "dist"
+New-Item -ItemType Directory -Force -Path $dist | Out-Null
+$finalExe = Join-Path $dist "KtavYad-Portable.exe"
+Copy-Item -LiteralPath $builtExe.FullName -Destination $finalExe -Force
+@"
+הפעלת הזיהוי האוטומטי:
+1. לצד KtavYad-Portable.exe צור תיקייה בשם models.
+2. בתוכה צור תיקייה בשם mishkefet.
+3. העתק לתוכה את הקובץ backbone.fp16.onnx מהגרסה הקודמת.
+הנתיב הסופי:
+models\mishkefet\backbone.fp16.onnx
+
+קובצי העזר הקטנים (charset.json, charlm.bin, words.bin, head.bin) כלולים ב-EXE.
+אפשר גם להניח את backbone.fp16.onnx ישירות לצד קובץ ה-EXE.
+"@ | Set-Content -Path (Join-Path $dist "README-Model.txt") -Encoding utf8
+Write-Host "PORTABLE EXE: $finalExe"
+Write-Host "SIZE_BYTES: $((Get-Item $finalExe).Length)"
+Write-Host "Model setup instructions: $(Join-Path $dist 'README-Model.txt')"
+ }) { throw "A large ONNX model was unexpectedly included in the runtime archive." }
+} finally { $verifyArchive.Dispose() }
+Write-Host "Runtime archive size (external ONNX model excluded): $([math]::Round((Get-Item $appArchive).Length / 1MB, 1)) MB"
 
 # Validate model files and load the ONNX graph with the Windows native runtime.
 Push-Location $standalone
