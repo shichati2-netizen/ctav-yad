@@ -234,11 +234,16 @@ Invoke-Checked "npm" @("install", "--save-dev", "electron", "electron-builder", 
 $pkg = Get-Content package.json -Raw | ConvertFrom-Json
 if (-not $pkg.version) { $pkg | Add-Member -NotePropertyName version -NotePropertyValue "1.0.0" -Force }
 $pkg | Add-Member -NotePropertyName main -NotePropertyValue "electron-main.cjs" -Force
+$dist = Join-Path $env:GITHUB_WORKSPACE "dist"
+if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
+$packageDir = Join-Path $dist "KtavYad"
+New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+
 $buildConfig = @{
   appId = "org.shichati.ctavyad"
   productName = "KtavYad"
   asar = $false
-  directories = @{ output = "dist-electron" }
+  directories = @{ output = $packageDir }
   files = @("electron-main.cjs", "package.json")
   extraResources = @(
     @{ from = ".next/standalone"; to = "runtime" }
@@ -579,25 +584,24 @@ try {
   Pop-Location
 }
 
-# Electron-builder's portable target is a single self-extracting Windows EXE.
+# Electron Builder writes the complete unpacked application directly to dist/KtavYad.
+# No second recursive PowerShell copy is needed.
 Set-Location $source
 Invoke-Checked "npx" @("electron-builder", "--win", "--dir", "--x64") "electron-builder directory packaging failed."
-$unpacked = Join-Path $source "dist-electron/win-unpacked"
-if (-not (Test-Path (Join-Path $unpacked "KtavYad.exe"))) { throw "Unpacked Windows application was not produced." }
-
-$dist = Join-Path $env:GITHUB_WORKSPACE "dist"
-if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
-$packageDir = Join-Path $dist "KtavYad"
-New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
-Copy-Item -Path (Join-Path $unpacked "*") -Destination $packageDir -Recurse -Force
 $finalExe = Join-Path $packageDir "KtavYad.exe"
+$runtimeServer = Join-Path $packageDir "resources/runtime/server.js"
+if (-not (Test-Path $finalExe)) { throw "KtavYad.exe was not produced in the final application folder." }
+if (-not (Test-Path $runtimeServer)) { throw "The server runtime folder was not copied into resources/runtime." }
+if (-not (Test-Path (Join-Path $packageDir "resources/runtime/.next/static/chunks"))) {
+  throw "The Next.js static chunks folder is missing from resources/runtime."
+}
 @"
 הפעלת הזיהוי האוטומטי:
-1. פתח את התיקייה KtavYad.
-2. העתק את backbone.fp16.onnx מהגרסה הקודמת לתיקייה models\mishkefet.
-3. לחלופין, אפשר להעתיק את הקובץ ישירות לצד KtavYad.exe.
+1. חלץ את כל תיקיית KtavYad ושמור את מבנה התיקיות כפי שהוא.
+2. בתוך KtavYad צור תיקייה בשם models ובתוכה mishkefet, והעתק לשם את backbone.fp16.onnx מהגרסה הקודמת.
+3. לחלופין, אפשר להעתיק את הקובץ backbone.fp16.onnx ישירות לצד KtavYad.exe.
 הנתיב המועדף:
-models\mishkefet\backbone.fp16.onnx
+KtavYad\models\mishkefet\backbone.fp16.onnx
 
 קובצי העזר הקטנים (charset.json, charlm.bin, words.bin, head.bin) כלולים בתיקיית התוכנה.
 הפעל את KtavYad.exe מתוך התיקייה. אין צורך להתקין Node.js או Python.
@@ -605,4 +609,5 @@ models\mishkefet\backbone.fp16.onnx
 Write-Host "APPLICATION EXE: $finalExe"
 Write-Host "EXE_SIZE_BYTES: $((Get-Item $finalExe).Length)"
 Write-Host "APPLICATION FOLDER: $packageDir"
+Write-Host "RUNTIME FOLDER: $(Join-Path $packageDir 'resources/runtime')"
 Write-Host "MODEL SETUP GUIDE: $(Join-Path $packageDir 'README-Model.txt')"
