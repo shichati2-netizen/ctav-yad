@@ -468,9 +468,7 @@ $bannerMarkup = @'
 $bannerPattern = '</header>\s*\{trainingRunning\s*&&\s*adapt\s*&&\s*\('
 $bannerRegex = [regex]::new($bannerPattern)
 if (-not $bannerRegex.IsMatch($componentText)) { throw "Could not find TranscriberApp header insertion point (line-ending independent match)." }
-$bannerContent = [regex]::Replace($bannerMarkup, '^\s*</header>\s*', '').TrimEnd()
-$bannerReplacement = "</header>`n`n" + $bannerContent + "`n`n      {trainingRunning && adapt && ("
-$componentText = $bannerRegex.Replace($componentText, $bannerReplacement, 1)
+$componentText = $bannerRegex.Replace($componentText, $bannerMarkup.Trim(), 1)
 Set-Content -Path $componentFile -Value $componentText -Encoding utf8
 
 $env:CTAV_BUILD_MODE = "1"
