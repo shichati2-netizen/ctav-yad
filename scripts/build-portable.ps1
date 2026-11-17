@@ -101,8 +101,38 @@ if (-not $engineText.Contains($loadCoreOld)) { throw "Could not locate loadCore(
 $engineText = $engineText.Replace($headOld, $headNew)
 $engineText = $engineText.Replace($modelDirOld, $modelDirNew)
 $engineText = $engineText.Replace($onnxOld, $onnxNew)
+$graphOptionsOld = 'graphOptimizationLevel: "disabled",'
+$graphOptionsNew = 'graphOptimizationLevel: "disabled", intraOpNumThreads: 2, interOpNumThreads: 1, executionMode: "sequential",'
+if (-not $engineText.Contains($graphOptionsOld)) { throw "Could not locate ONNX graph options in engine.ts." }
+$engineText = $engineText.Replace($graphOptionsOld, $graphOptionsNew)
 $engineText = $engineText.Replace($loadCoreOld, $loadCoreNew)
 Set-Content -Path $engineFile -Value $engineText -Encoding utf8
+
+$readyRouteDir = Join-Path $source "src/app/api/mishkefet/ready"
+New-Item -ItemType Directory -Force -Path $readyRouteDir | Out-Null
+@'
+import fs from "node:fs";
+import { getCore, ONNX_MODEL_PATH } from "@/lib/mishkefet/engine";
+
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  return Response.json({
+    exists: fs.existsSync(ONNX_MODEL_PATH),
+    modelPath: ONNX_MODEL_PATH,
+  });
+}
+
+export async function POST() {
+  try {
+    await getCore();
+    return Response.json({ ready: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return Response.json({ ready: false, error: message }, { status: 503 });
+  }
+}
+'@ | Set-Content -Path (Join-Path $readyRouteDir "route.ts") -Encoding utf8
 
 # Configure Next.js file tracing and generate PostgreSQL-compatible schema migrations.
 $nextConfigFile = Join-Path $source "next.config.ts"
@@ -215,10 +245,8 @@ $buildConfig = @{
     @{ from = "runtime-app-version.txt"; to = "app-version.txt" }
   )
   win = @{
-    target = @(@{ target = "portable"; arch = @("x64") })
     signAndEditExecutable = $false
   }
-  portable = @{ artifactName = "KtavYad-Portable.exe" }
   extraFiles = @(@{ from = "runtime-native"; to = "." })
 }
 $pkg | Add-Member -NotePropertyName build -NotePropertyValue $buildConfig -Force
@@ -334,6 +362,135 @@ app.on("before-quit",()=>{quitting=true;if(serverProcess&&serverProcess.exitCode
 app.on("window-all-closed",()=>app.quit());
 '@ | Set-Content -Path (Join-Path $source "electron-main.cjs") -Encoding utf8
 
+$componentFile = Join-Path $source "src/components/TranscriberApp.tsx"
+$componentText = Get-Content -Path $componentFile -Raw
+$stateOld = '  const [useOcr, setUseOcr] = useState(true);'
+$stateNew = @'
+  const [useOcr, setUseOcr] = useState(true);
+  const [modelLoadState, setModelLoadState] = useState<"checking" | "loading" | "ready" | "missing" | "error">("checking");
+  const [modelLoadMessage, setModelLoadMessage] = useState("בודק את קובץ מודל הזיהוי...");
+'@
+if (-not $componentText.Contains($stateOld)) { throw "Could not find TranscriberApp OCR state declaration." }
+$componentText = $componentText.Replace($stateOld, $stateNew.TrimEnd())
+
+$effectsOld = @'
+  useEffect(() => {
+    void refreshAdapt();
+    void refreshDocs();
+  }, [refreshAdapt, refreshDocs]);
+'@
+$effectsNew = @'
+  useEffect(() => {
+    void refreshAdapt();
+    void refreshDocs();
+  }, [refreshAdapt, refreshDocs]);
+
+  // The UI renders first. Only then does the background model warm-up begin.
+  useEffect(() => {
+    let cancelled = false;
+    let slowTimer: number | undefined;
+    const loadModel = async () => {
+      try {
+        setModelLoadState("checking");
+        setModelLoadMessage("בודק את קובץ מודל הזיהוי...");
+        const check = await fetch("/api/mishkefet/ready", { cache: "no-store" });
+        const info = (await check.json()) as { exists?: boolean; modelPath?: string };
+        if (cancelled) return;
+        if (!check.ok || !info.exists) {
+          setModelLoadState("missing");
+          setModelLoadMessage(
+            "קובץ backbone.fp16.onnx לא נמצא. העתק אותו לתיקייה models/mishkefet ליד KtavYad.exe, או ישירות לצד קובץ ה-EXE. נתיב שנבדק: " + (info.modelPath ?? "לא ידוע"),
+          );
+          return;
+        }
+
+        setModelLoadState("loading");
+        setModelLoadMessage("קובץ המודל נמצא. טוען את מנוע הזיהוי ברקע...");
+        slowTimer = window.setTimeout(() => {
+          if (!cancelled) setModelLoadMessage("טעינת רשת הזיהוי עדיין מתבצעת. הממשק נשאר זמין בזמן הטעינה...");
+        }, 5000);
+
+        const response = await fetch("/api/mishkefet/ready", { method: "POST" });
+        const result = (await response.json()) as { ready?: boolean; error?: string };
+        if (cancelled) return;
+        if (!response.ok || !result.ready) {
+          setModelLoadState("error");
+          setModelLoadMessage(result.error ?? "טעינת מודל הזיהוי נכשלה.");
+          return;
+        }
+        setModelLoadState("ready");
+        setModelLoadMessage("מנוע הזיהוי מוכן.");
+      } catch (error) {
+        if (!cancelled) {
+          setModelLoadState("error");
+          setModelLoadMessage(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (slowTimer !== undefined) window.clearTimeout(slowTimer);
+      }
+    };
+    void loadModel();
+    return () => {
+      cancelled = true;
+      if (slowTimer !== undefined) window.clearTimeout(slowTimer);
+    };
+  }, []);
+'@
+if (-not $componentText.Contains($effectsOld)) { throw "Could not find TranscriberApp initialization effects." }
+$componentText = $componentText.Replace($effectsOld, $effectsNew)
+
+$bannerAnchor = @'
+      </header>
+
+      {trainingRunning && adapt && (
+'@
+$bannerMarkup = @'
+      </header>
+
+      {modelLoadState !== "ready" ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className={
+            "border-b px-4 py-3 " +
+            (modelLoadState === "missing" || modelLoadState === "error"
+              ? "border-amber-500/40 bg-amber-950/50 text-amber-100"
+              : "border-indigo-500/40 bg-indigo-950/50 text-indigo-100")
+          }
+        >
+          <div className="mx-auto flex max-w-7xl items-center gap-3">
+            {modelLoadState === "loading" || modelLoadState === "checking" ? (
+              <div className="size-5 shrink-0 animate-spin rounded-full border-2 border-indigo-800 border-t-indigo-200" />
+            ) : (
+              <span className="text-lg">!</span>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold">
+                {modelLoadState === "missing" ? "נדרש קובץ מודל חיצוני" :
+                 modelLoadState === "error" ? "טעינת המודל נכשלה" :
+                 modelLoadState === "checking" ? "בודק את קובצי המודל" : "טוען את מודל הזיהוי"}
+              </div>
+              <div className="mt-1 break-words text-xs opacity-90">{modelLoadMessage}</div>
+              {(modelLoadState === "loading" || modelLoadState === "checking") && (
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                  <div className="h-full w-1/3 animate-pulse rounded-full bg-indigo-300" />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="border-b border-emerald-500/20 bg-emerald-950/20 px-4 py-1 text-center text-xs text-emerald-300">
+          מנוע הזיהוי מוכן
+        </div>
+      )}
+
+      {trainingRunning && adapt && (
+'@
+if (-not $componentText.Contains($bannerAnchor)) { throw "Could not find TranscriberApp header insertion point." }
+$componentText = $componentText.Replace($bannerAnchor, $bannerMarkup)
+Set-Content -Path $componentFile -Value $componentText -Encoding utf8
+
 $env:CTAV_BUILD_MODE = "1"
 $env:NEXT_TELEMETRY_DISABLED = "1"
 Invoke-Checked "npx" @("drizzle-kit", "generate", "--config=drizzle.config.ts") "Generating local database migrations failed."
@@ -435,6 +592,10 @@ try {
     $baseUrl = "http://127.0.0.1:32191"
     $home = Invoke-WebRequest -Uri "$baseUrl/" -TimeoutSec 20
     if ($home.StatusCode -ne 200) { throw "Packaged homepage did not return HTTP 200." }
+    $modelCheck = Invoke-WebRequest -Uri "$baseUrl/api/mishkefet/ready" -TimeoutSec 20
+    $modelState = $modelCheck.Content | ConvertFrom-Json
+    if ($modelState.exists -ne $false) { throw "The build smoke-test unexpectedly found a bundled ONNX backbone." }
+    Write-Host "External ONNX model path is reported as missing without crashing the server: $($modelState.modelPath)"
     $chunkRoot = Join-Path $standalone ".next/static/chunks"
     if (-not (Test-Path $chunkRoot)) { throw "Next.js static chunks folder is missing." }
     $chunkFiles = @(Get-ChildItem $chunkRoot -Recurse -File -Filter "*.js")
@@ -461,7 +622,7 @@ try {
 
 # Electron-builder's portable target is a single self-extracting Windows EXE.
 Set-Location $source
-Invoke-Checked "npx" @("electron-builder", "--win", "dir", "--x64") "electron-builder directory packaging failed."
+Invoke-Checked "npx" @("electron-builder", "--win", "--dir", "--x64") "electron-builder directory packaging failed."
 $unpacked = Join-Path $source "dist-electron/win-unpacked"
 if (-not (Test-Path (Join-Path $unpacked "KtavYad.exe"))) { throw "Unpacked Windows application was not produced." }
 
@@ -473,15 +634,16 @@ Copy-Item -Path (Join-Path $unpacked "*") -Destination $packageDir -Recurse -For
 $finalExe = Join-Path $packageDir "KtavYad.exe"
 @"
 הפעלת הזיהוי האוטומטי:
-1. לצד KtavYad-Portable.exe צור תיקייה בשם models.
-2. בתוכה צור תיקייה בשם mishkefet.
-3. העתק לתוכה את הקובץ backbone.fp16.onnx מהגרסה הקודמת.
-הנתיב הסופי:
+1. פתח את התיקייה KtavYad.
+2. העתק את backbone.fp16.onnx מהגרסה הקודמת לתיקייה models\mishkefet.
+3. לחלופין, אפשר להעתיק את הקובץ ישירות לצד KtavYad.exe.
+הנתיב המועדף:
 models\mishkefet\backbone.fp16.onnx
 
-קובצי העזר הקטנים (charset.json, charlm.bin, words.bin, head.bin) כלולים ב-EXE.
-אפשר גם להניח את backbone.fp16.onnx ישירות לצד קובץ ה-EXE.
-"@ | Set-Content -Path (Join-Path $dist "README-Model.txt") -Encoding utf8
-Write-Host "PORTABLE EXE: $finalExe"
-Write-Host "SIZE_BYTES: $((Get-Item $finalExe).Length)"
-Write-Host "Model setup instructions: $(Join-Path $dist 'README-Model.txt')"
+קובצי העזר הקטנים (charset.json, charlm.bin, words.bin, head.bin) כלולים בתיקיית התוכנה.
+הפעל את KtavYad.exe מתוך התיקייה. אין צורך להתקין Node.js או Python.
+"@ | Set-Content -Path (Join-Path $packageDir "README-Model.txt") -Encoding utf8
+Write-Host "APPLICATION EXE: $finalExe"
+Write-Host "EXE_SIZE_BYTES: $((Get-Item $finalExe).Length)"
+Write-Host "APPLICATION FOLDER: $packageDir"
+Write-Host "MODEL SETUP GUIDE: $(Join-Path $packageDir 'README-Model.txt')"
