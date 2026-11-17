@@ -1,4 +1,4 @@
-name: Build KtavYad portable Windows EXE
+name: Build KtavYad unpacked Windows folder
 
 on:
   workflow_dispatch:
@@ -24,16 +24,14 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Build self-contained portable EXE
+      - name: Build unpacked folder with KtavYad.exe
         shell: pwsh
         run: ./scripts/build-portable.ps1
 
-      - name: Upload EXE
+      - name: Upload complete application folder
         uses: actions/upload-artifact@v4
         with:
-          name: KtavYad-Windows-Portable
-          path: |
-            dist/KtavYad-Portable.exe
-            dist/README-Model.txt
+          name: KtavYad-Windows-Folder
+          path: dist/
           if-no-files-found: error
           retention-days: 30
