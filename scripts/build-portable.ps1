@@ -89,9 +89,9 @@ $engineText = Get-Content -Path $engineFile -Raw
 $headOld = 'export const HEADS_DIR = path.join(process.cwd(), "data", "heads");'
 $headNew = 'export const HEADS_DIR = path.join(process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(process.cwd(), "data"), "heads");'
 $modelDirOld = 'export const MODEL_DIR = path.join(process.cwd(), "models", "mishkefet");'
-$modelDirNew = 'export const MODEL_DIR = path.join(process.cwd(), "models", "mishkefet");'
+$modelDirNew = 'export const MODEL_DIR = path.join(process.cwd(), "models", "mishkefet"); export const ONNX_MODEL_PATH = process.env.MISHKEFET_ONNX_PATH ? path.resolve(process.env.MISHKEFET_ONNX_PATH) : path.join(MODEL_DIR, "backbone.fp16.onnx");'
 $onnxOld = 'const session = await ort.InferenceSession.create(path.join(MODEL_DIR, "backbone.fp16.onnx"), {'
-$onnxNew = 'export const ONNX_MODEL_PATH = process.env.MISHKEFET_ONNX_PATH ? path.resolve(process.env.MISHKEFET_ONNX_PATH) : path.join(MODEL_DIR, "backbone.fp16.onnx"); const session = await ort.InferenceSession.create(ONNX_MODEL_PATH, {'
+$onnxNew = 'const session = await ort.InferenceSession.create(ONNX_MODEL_PATH, {'
 $loadCoreOld = 'async function loadCore(): Promise<Core> {'
 $loadCoreNew = 'async function loadCore(): Promise<Core> { if (!fs.existsSync(ONNX_MODEL_PATH)) throw new Error("קובץ backbone.fp16.onnx חסר. יש להעתיק אותו לתיקייה models/mishkefet ליד קובץ התוכנה. נתיב נבדק: " + ONNX_MODEL_PATH);'
 if (-not $engineText.Contains($headOld)) { throw "Could not locate HEADS_DIR declaration in engine.ts." }
