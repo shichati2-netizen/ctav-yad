@@ -241,7 +241,7 @@ $buildConfig = @{
   directories = @{ output = "dist-electron" }
   files = @("electron-main.cjs", "package.json")
   extraResources = @(
-    @{ from = ".next/standalone"; to = "app" }
+    @{ from = ".next/standalone"; to = "runtime" }
   )
   win = @{
     signAndEditExecutable = $false
@@ -310,9 +310,9 @@ app.whenReady().then(async()=>{
     const dataRoot=getDataRoot();
     const dbDir=path.join(dataRoot,"database"), dataDir=path.join(dataRoot,"data"), logsDir=path.join(dataRoot,"logs");
     for(const d of [dbDir,dataDir,logsDir])fs.mkdirSync(d,{recursive:true});
-    const appRoot=path.join(process.resourcesPath,"app");
+    const appRoot=path.join(process.resourcesPath,"runtime");
     const serverFile=path.join(appRoot,"server.js");
-    if(!fs.existsSync(serverFile))throw new Error("קובצי השרת חסרים בתיקיית resources/app.");
+    if(!fs.existsSync(serverFile))throw new Error("קובצי השרת חסרים בתיקיית resources/runtime.");
     setStatus("הממשק מוכן. מפעיל את השרת המקומי…");
     const port=await freePort(), baseUrl="http://127.0.0.1:"+port, logFile=path.join(logsDir,"server.log"), log=fs.createWriteStream(logFile,{flags:"a"});
     serverProcess=spawn(process.execPath,[serverFile],{cwd:appRoot,windowsHide:true,stdio:["ignore","pipe","pipe"],env:{
