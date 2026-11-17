@@ -588,26 +588,33 @@ try {
 # No second recursive PowerShell copy is needed.
 Set-Location $source
 Invoke-Checked "npx" @("electron-builder", "--win", "--dir", "--x64") "electron-builder directory packaging failed."
-$finalExe = Join-Path $packageDir "KtavYad.exe"
-$runtimeServer = Join-Path $packageDir "resources/runtime/server.js"
+$builderOutput = Join-Path $packageDir "win-unpacked"
+if (-not (Test-Path (Join-Path $builderOutput "KtavYad.exe"))) {
+  throw "Electron Builder did not produce the expected win-unpacked/KtavYad.exe."
+}
+$applicationDir = Join-Path $packageDir "Application"
+if (Test-Path $applicationDir) { Remove-Item -LiteralPath $applicationDir -Recurse -Force }
+Move-Item -LiteralPath $builderOutput -Destination $applicationDir
+$finalExe = Join-Path $applicationDir "KtavYad.exe"
+$runtimeServer = Join-Path $applicationDir "resources/runtime/server.js"
 if (-not (Test-Path $finalExe)) { throw "KtavYad.exe was not produced in the final application folder." }
 if (-not (Test-Path $runtimeServer)) { throw "The server runtime folder was not copied into resources/runtime." }
-if (-not (Test-Path (Join-Path $packageDir "resources/runtime/.next/static/chunks"))) {
+if (-not (Test-Path (Join-Path $applicationDir "resources/runtime/.next/static/chunks"))) {
   throw "The Next.js static chunks folder is missing from resources/runtime."
 }
 @"
 הפעלת הזיהוי האוטומטי:
-1. חלץ את כל תיקיית KtavYad ושמור את מבנה התיקיות כפי שהוא.
-2. בתוך KtavYad צור תיקייה בשם models ובתוכה mishkefet, והעתק לשם את backbone.fp16.onnx מהגרסה הקודמת.
-3. לחלופין, אפשר להעתיק את הקובץ backbone.fp16.onnx ישירות לצד KtavYad.exe.
+1. חלץ את תיקיית KtavYad ושמור על מבנה התיקיות.
+2. בתוך תיקיית Application צור תיקייה בשם models ובתוכה mishkefet.
+3. העתק לשם את backbone.fp16.onnx מהגרסה הקודמת. אפשר גם להעתיק אותו ישירות לצד KtavYad.exe.
 הנתיב המועדף:
-KtavYad\models\mishkefet\backbone.fp16.onnx
+KtavYad\Application\models\mishkefet\backbone.fp16.onnx
 
-קובצי העזר הקטנים (charset.json, charlm.bin, words.bin, head.bin) כלולים בתיקיית התוכנה.
-הפעל את KtavYad.exe מתוך התיקייה. אין צורך להתקין Node.js או Python.
+קובצי העזר הקטנים (charset.json, charlm.bin, words.bin, head.bin) כלולים בתיקיית Application.
+הפעל את Application\KtavYad.exe. אין צורך להתקין Node.js או Python.
 "@ | Set-Content -Path (Join-Path $packageDir "README-Model.txt") -Encoding utf8
 Write-Host "APPLICATION EXE: $finalExe"
 Write-Host "EXE_SIZE_BYTES: $((Get-Item $finalExe).Length)"
-Write-Host "APPLICATION FOLDER: $packageDir"
-Write-Host "RUNTIME FOLDER: $(Join-Path $packageDir 'resources/runtime')"
+Write-Host "APPLICATION FOLDER: $applicationDir"
+Write-Host "RUNTIME FOLDER: $(Join-Path $applicationDir 'resources/runtime')"
 Write-Host "MODEL SETUP GUIDE: $(Join-Path $packageDir 'README-Model.txt')"
