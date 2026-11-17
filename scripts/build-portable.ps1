@@ -549,8 +549,8 @@ try {
       throw "Portable server did not become healthy. See logs above."
     }
     $baseUrl = "http://127.0.0.1:32191"
-    $home = Invoke-WebRequest -Uri "$baseUrl/" -TimeoutSec 20
-    if ($home.StatusCode -ne 200) { throw "Packaged homepage did not return HTTP 200." }
+    $homeResponse = Invoke-WebRequest -Uri "$baseUrl/" -TimeoutSec 20
+    if ($homeResponse.StatusCode -ne 200) { throw "Packaged homepage did not return HTTP 200." }
     $modelCheck = Invoke-WebRequest -Uri "$baseUrl/api/mishkefet/ready" -TimeoutSec 20
     $modelState = $modelCheck.Content | ConvertFrom-Json
     if ($modelState.exists -ne $false) { throw "The build smoke-test unexpectedly found a bundled ONNX backbone." }
