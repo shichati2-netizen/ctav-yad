@@ -461,14 +461,16 @@ try {
 
 # Electron-builder's portable target is a single self-extracting Windows EXE.
 Set-Location $source
-Invoke-Checked "npx" @("electron-builder", "--win", "portable", "--x64") "electron-builder failed."
-$builtExe = Get-ChildItem (Join-Path $source "dist-electron") -Filter "*.exe" -File | Select-Object -First 1
-if (-not $builtExe) { throw "Portable EXE was not produced." }
+Invoke-Checked "npx" @("electron-builder", "--win", "dir", "--x64") "electron-builder directory packaging failed."
+$unpacked = Join-Path $source "dist-electron/win-unpacked"
+if (-not (Test-Path (Join-Path $unpacked "KtavYad.exe"))) { throw "Unpacked Windows application was not produced." }
 
 $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
-New-Item -ItemType Directory -Force -Path $dist | Out-Null
-$finalExe = Join-Path $dist "KtavYad-Portable.exe"
-Copy-Item -LiteralPath $builtExe.FullName -Destination $finalExe -Force
+if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
+$packageDir = Join-Path $dist "KtavYad"
+New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+Copy-Item -Path (Join-Path $unpacked "*") -Destination $packageDir -Recurse -Force
+$finalExe = Join-Path $packageDir "KtavYad.exe"
 @"
 הפעלת הזיהוי האוטומטי:
 1. לצד KtavYad-Portable.exe צור תיקייה בשם models.
@@ -483,6 +485,3 @@ models\mishkefet\backbone.fp16.onnx
 Write-Host "PORTABLE EXE: $finalExe"
 Write-Host "SIZE_BYTES: $((Get-Item $finalExe).Length)"
 Write-Host "Model setup instructions: $(Join-Path $dist 'README-Model.txt')"
- }) { throw "A large ONNX model was unexpectedly included in the runtime archive." }
-} finally { $verifyArchive.Dispose() }
-Write-Host "Runtime archive size (external ONNX model excluded): $([math]::Round((Get-Item $appArchive).Length / 1MB, 1)) MB"
