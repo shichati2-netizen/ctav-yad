@@ -378,7 +378,11 @@ try {
 } finally { $archiveCheck.Dispose() }
 $verifyArchive = [System.IO.Compression.ZipFile]::OpenRead($appArchive)
 try {
-  if ($verifyArchive.Entries | Where-Object { $_.FullName -match '\.onnx
+  if ($verifyArchive.Entries | Where-Object { $_.FullName.EndsWith(".onnx", [System.StringComparison]::OrdinalIgnoreCase) }) {
+    throw "A large ONNX model was unexpectedly included in the runtime archive."
+  }
+} finally { $verifyArchive.Dispose() }
+Write-Host "Runtime archive size (external ONNX model excluded): $([math]::Round((Get-Item $appArchive).Length / 1MB, 1)) MB"
 
 # Validate model files and load the ONNX graph with the Windows native runtime.
 Push-Location $standalone
