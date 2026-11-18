@@ -618,10 +618,24 @@ if (Test-Path $applicationDir) { Remove-Item -LiteralPath $applicationDir -Recur
 Move-Item -LiteralPath $builderOutput -Destination $applicationDir
 $finalExe = Join-Path $applicationDir "KtavYad.exe"
 $runtimeServer = Join-Path $applicationDir "resources/runtime/server.js"
+$runtimeDir = Join-Path $applicationDir "resources/runtime"
+$runtimeNextPackage = Join-Path $runtimeDir "node_modules/next/package.json"
 if (-not (Test-Path $finalExe)) { throw "KtavYad.exe was not produced in the final application folder." }
 if (-not (Test-Path $runtimeServer)) { throw "The server runtime folder was not copied into resources/runtime." }
-if (-not (Test-Path (Join-Path $applicationDir "resources/runtime/.next/static/chunks"))) {
+if (-not (Test-Path $runtimeNextPackage)) {
+  throw "The final Electron package is missing resources/runtime/node_modules/next/package.json. Refusing to publish a broken app."
+}
+if (-not (Test-Path (Join-Path $runtimeDir ".next/static/chunks"))) {
   throw "The Next.js static chunks folder is missing from resources/runtime."
+}
+
+# Repeat Node's module-resolution check from the exact final server directory.
+Push-Location $runtimeDir
+try {
+  node -e "const p=require.resolve('next');const n=require('next/package.json').version;console.log('Final packaged Next.js OK:',n,'resolved to',p)"
+  if ($LASTEXITCODE -ne 0) { throw "The final packaged runtime cannot resolve the Next.js framework package." }
+} finally {
+  Pop-Location
 }
 @"
 הפעלת הזיהוי האוטומטי:
