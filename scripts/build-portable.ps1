@@ -610,7 +610,73 @@ foreach ($chunk in Get-ChildItem -LiteralPath $standaloneServerChunks -Recurse -
   $chunkText = [System.IO.File]::ReadAllText($chunk.FullName)
   foreach ($match in $aliasRegex.Matches($chunkText)) {
     $alias = $match.Groups["alias"].Value
-    $packageName = [regex]::Replace($alias,'-[0-9a-f]{8,32}
+    $packageName = [regex]::Replace($alias, '-[0-9a-f]{8,32}$', '', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $packageRelative = $packageName.Replace("/", [System.IO.Path]::DirectorySeparatorChar)
+    $standalonePackage = Join-Path $standaloneNodeModules $packageRelative
+    $sourcePackage = Join-Path (Join-Path $source "node_modules") $packageRelative
+    if (-not (Test-Path (Join-Path $standalonePackage "package.json") -PathType Leaf)) {
+      if (Test-Path (Join-Path $sourcePackage "package.json") -PathType Leaf) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $standalonePackage -Parent) | Out-Null
+        if (Test-Path $standalonePackage) {
+          Remove-Item -LiteralPath $standalonePackage -Recurse -Force
+        }
+        Copy-Item -LiteralPath $sourcePackage -Destination $standalonePackage -Recurse -Force
+        Write-Host "Restored missing Turbopack dependency package: $packageName"
+      } else {
+        continue
+      }
+    }
+    if (-not ($turbopackAliases | Where-Object { $_.Alias -eq $alias })) {
+      $turbopackAliases += [pscustomobject]@{ Alias = $alias; Package = $packageName }
+    }
+  }
+}
+if ($turbopackAliases.Count -lt 1) {
+  throw "Turbopack emitted no resolvable hashed external module aliases."
+}
+$turbopackAliases = @($turbopackAliases | Sort-Object -Property Alias -Unique)
+Write-Host "Detected Turbopack aliases: $(($turbopackAliases | ForEach-Object { $_.Alias + ' -> ' + $_.Package }) -join '; ')"
+
+function Write-TurbopackAliasWrappers([string]$Root) {
+  $rootInfo = Get-Item -LiteralPath $Root -Force -ErrorAction SilentlyContinue
+  if ($rootInfo -and (($rootInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+    & cmd.exe /c rmdir "$Root"
+    if ($LASTEXITCODE -ne 0) {
+      throw "Could not remove Turbopack trace junction: $Root"
+    }
+  }
+  New-Item -ItemType Directory -Force -Path $Root | Out-Null
+  foreach ($entry in $turbopackAliases) {
+    $aliasDir = Join-Path $Root $entry.Alias
+    $existingAlias = Get-Item -LiteralPath $aliasDir -Force -ErrorAction SilentlyContinue
+    if ($existingAlias) {
+      if (($existingAlias.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if (($existingAlias.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+          & cmd.exe /c rmdir "$aliasDir"
+        } else {
+          Remove-Item -LiteralPath $aliasDir -Force
+        }
+        if ($LASTEXITCODE -ne 0) {
+          throw "Could not remove Turbopack alias link: $aliasDir"
+        }
+      } else {
+        Remove-Item -LiteralPath $aliasDir -Recurse -Force
+      }
+    }
+    New-Item -ItemType Directory -Force -Path $aliasDir | Out-Null
+    @{ name = $entry.Alias; version = "1.0.0"; main = "index.cjs"; type = "commonjs" } |
+      ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $aliasDir "package.json") -Encoding utf8
+    ('module.exports = require("' + $entry.Package + '");') |
+      Set-Content -LiteralPath (Join-Path $aliasDir "index.cjs") -Encoding utf8
+  }
+  Write-Host "Wrote $($turbopackAliases.Count) real Turbopack alias wrappers into $Root"
+}
+
+$standaloneTraceModules = Join-Path $standalone ".next/node_modules"
+Write-TurbopackAliasWrappers $standaloneTraceModules
+
+$env:CTAV_TURBOPACK_ALIASES = ($turbopackAliases | ForEach-Object { $_.Alias }) -join ";"
+
 Push-Location $standalone
 try {
   node -e "const p=require.resolve('next/package.json');const swc=require.resolve('@swc/helpers/_/_interop_require_default');const helper=require('@swc/helpers/_/_interop_require_default');const wildcard=require('@swc/helpers/_/_interop_require_wildcard');require('next');console.log('Packaged Next.js and SWC ESM dependencies loaded:',p,'; SWC:',swc,'; helpers:',typeof helper._,typeof wildcard._);"
