@@ -246,7 +246,10 @@ $buildConfig = @{
   directories = @{ output = $packageDir }
   files = @("electron-main.cjs", "package.json")
   extraResources = @(
-    @{ from = ".next/standalone"; to = "runtime" }
+    @{ from = ".next/standalone"; to = "runtime" },
+    # Copy Next.js directly as a separate resource as an extra safeguard:
+    # Electron Builder's standalone directory filter omitted this package in the final app.
+    @{ from = "node_modules/next"; to = "runtime/node_modules/next" }
   )
   win = @{
     signAndEditExecutable = $false
