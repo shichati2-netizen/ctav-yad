@@ -228,6 +228,20 @@ $runtimeNativeDir = Join-Path $source "runtime-native"
 New-Item -ItemType Directory -Force -Path $runtimeNativeDir | Out-Null
 Copy-Item -Path (Join-Path $ortNativeDir "*") -Destination $runtimeNativeDir -Recurse -Force
 
+# Ship a regular Node.js runtime beside Electron. The app UI remains Electron,
+# while Next.js/ONNX run in the same standalone Node runtime used by CI smoke tests.
+$portableNodeDir = Join-Path $source "portable-node"
+New-Item -ItemType Directory -Force -Path $portableNodeDir | Out-Null
+$runnerNodeExe = (Get-Command node).Source
+Copy-Item -LiteralPath $runnerNodeExe -Destination (Join-Path $portableNodeDir "node.exe") -Force
+Copy-Item -Path (Join-Path $runtimeNativeDir "*") -Destination $portableNodeDir -Recurse -Force
+$nodeLicense = Join-Path (Split-Path $runnerNodeExe -Parent) "LICENSE"
+if (Test-Path -LiteralPath $nodeLicense -PathType Leaf) {
+  Copy-Item -LiteralPath $nodeLicense -Destination (Join-Path $portableNodeDir "LICENSE") -Force
+}
+& (Join-Path $portableNodeDir "node.exe") --version
+if ($LASTEXITCODE -ne 0) { throw "The bundled standalone Node.js runtime could not be executed." }
+
 Invoke-Checked "npm" @("install", "--save-dev", "electron", "electron-builder", "--no-audit", "--no-fund") "Installing Electron build tools failed."
 
 # The Electron launcher is small; the complete unpacked app is stored in resources/app.
@@ -247,6 +261,7 @@ $buildConfig = @{
   files = @("electron-main.cjs", "package.json")
   extraResources = @(
     @{ from = ".next/standalone"; to = "runtime" },
+    @{ from = "portable-node"; to = "node-runtime" },
     # Explicitly restore Next and SWC ESM files in the final Electron resources.
     @{ from = "node_modules/next"; to = "runtime/node_modules/next" },
     @{ from = ".next/standalone/node_modules/@swc/helpers/esm"; to = "runtime/node_modules/@swc/helpers/esm" }
@@ -381,10 +396,14 @@ app.whenReady().then(async()=>{
     if(!fs.existsSync(serverFile))throw new Error("קובצי השרת חסרים בתיקיית resources/runtime.");
     setStatus("הממשק מוכן. מפעיל את השרת המקומי…");
     const port=await freePort(), baseUrl="http://127.0.0.1:"+port, logFile=path.join(logsDir,"server.log"), log=fs.createWriteStream(logFile,{flags:"a"});
-    serverProcess=spawn(process.execPath,[serverFile],{cwd:appRoot,windowsHide:true,stdio:["ignore","pipe","pipe"],env:{
-      ...process.env,ELECTRON_RUN_AS_NODE:"1",NODE_ENV:"production",NEXT_TELEMETRY_DISABLED:"1",HOSTNAME:"127.0.0.1",PORT:String(port),
+    const nodeRuntimeFile=path.join(process.resourcesPath,"node-runtime","node.exe");
+    if(!fs.existsSync(nodeRuntimeFile))throw new Error("קובץ Node.js המצורף חסר: "+nodeRuntimeFile);
+    const nodeRuntimePath=path.dirname(nodeRuntimeFile);
+    serverProcess=spawn(nodeRuntimeFile,[serverFile],{cwd:appRoot,windowsHide:true,stdio:["ignore","pipe","pipe"],env:{
+      ...process.env,NODE_ENV:"production",NEXT_TELEMETRY_DISABLED:"1",HOSTNAME:"127.0.0.1",PORT:String(port),
       PGLITE_DATA_DIR:dbDir,DATA_DIR:dataDir,DRIZZLE_MIGRATIONS_DIR:path.join(appRoot,"drizzle"),
       MISHKEFET_ONNX_PATH: selectedModelPath || path.join(exeDir,"models","mishkefet","backbone.fp16.onnx"),
+      PATH:nodeRuntimePath+path.delimiter+(process.env.PATH||""),
       UV_THREADPOOL_SIZE:"2",OMP_NUM_THREADS:"2",OMP_WAIT_POLICY:"PASSIVE",KMP_BLOCKTIME:"0",OPENBLAS_NUM_THREADS:"1",MKL_NUM_THREADS:"1"
     }});
     serverProcess.stdout.pipe(log);serverProcess.stderr.pipe(log);
