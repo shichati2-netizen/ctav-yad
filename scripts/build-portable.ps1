@@ -288,6 +288,56 @@ function getDataRoot() {
   }
   return path.join(app.getPath("userData"), "data");
 }
+async function ensureModelFile(exeDir, dataRoot) {
+  const preferred = path.join(exeDir, "models", "mishkefet", "backbone.fp16.onnx");
+  const dataFallback = path.join(dataRoot, "models", "mishkefet", "backbone.fp16.onnx");
+  const minimumBytes = 50 * 1024 * 1024;
+
+  const isUsable = (file) => {
+    try {
+      const stat = fs.statSync(file);
+      return stat.isFile() && stat.size >= minimumBytes;
+    } catch { return false; }
+  };
+
+  if (isUsable(preferred)) return preferred;
+  if (isUsable(dataFallback)) return dataFallback;
+
+  setStatus("בפעם הראשונה יש לבחור את קובץ מודל הזיהוי (ONNX)...");
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "בחירת מודל הזיהוי של כתב יד",
+    buttonLabel: "בחר קובץ מודל",
+    properties: ["openFile"],
+    filters: [{ name: "Mishkefet ONNX model", extensions: ["onnx"] }]
+  });
+  if (result.canceled || !result.filePaths || !result.filePaths[0]) return null;
+
+  const selected = path.resolve(result.filePaths[0]);
+  if (path.extname(selected).toLowerCase() !== ".onnx") {
+    throw new Error("יש לבחור קובץ עם סיומת .onnx.");
+  }
+  const sourceStat = fs.statSync(selected);
+  if (!sourceStat.isFile() || sourceStat.size < minimumBytes) {
+    throw new Error("הקובץ שנבחר קטן מדי או אינו קובץ מודל ONNX תקין.");
+  }
+
+  let destination = preferred;
+  try {
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    if (selected !== path.resolve(destination)) await fs.promises.copyFile(selected, destination);
+  } catch (error) {
+    // Protected installation paths may be read-only: use the per-user folder.
+    destination = dataFallback;
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    if (selected !== path.resolve(destination)) await fs.promises.copyFile(selected, destination);
+  }
+
+  if (!isUsable(destination) || fs.statSync(destination).size !== sourceStat.size) {
+    throw new Error("העתקת קובץ המודל לא הושלמה. נסה לבחור את הקובץ שוב.");
+  }
+  setStatus("קובץ המודל נשמר. מפעיל את מנוע הזיהוי...");
+  return destination;
+}
 function freePort() {
   return new Promise((resolve,reject)=>{
     const s=net.createServer(); s.once("error",reject);
@@ -318,7 +368,13 @@ app.whenReady().then(async()=>{
     const dataRoot=getDataRoot();
     const dbDir=path.join(dataRoot,"database"), dataDir=path.join(dataRoot,"data"), logsDir=path.join(dataRoot,"logs");
     for(const d of [dbDir,dataDir,logsDir])fs.mkdirSync(d,{recursive:true});
+    const exeDir=process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath);
+    const selectedModelPath=await ensureModelFile(exeDir,dataRoot);
     const appRoot=path.join(process.resourcesPath,"runtime");
+    const supportDir=path.join(appRoot,"models","mishkefet");
+    for(const file of ["charset.json","charlm.bin","words.bin","head.bin"]) {
+      if(!fs.existsSync(path.join(supportDir,file))) throw new Error("קובץ עזר חסר בחבילת התוכנה: "+file);
+    }
     const serverFile=path.join(appRoot,"server.js");
     if(!fs.existsSync(serverFile))throw new Error("קובצי השרת חסרים בתיקיית resources/runtime.");
     setStatus("הממשק מוכן. מפעיל את השרת המקומי…");
@@ -326,12 +382,7 @@ app.whenReady().then(async()=>{
     serverProcess=spawn(process.execPath,[serverFile],{cwd:appRoot,windowsHide:true,stdio:["ignore","pipe","pipe"],env:{
       ...process.env,ELECTRON_RUN_AS_NODE:"1",NODE_ENV:"production",NEXT_TELEMETRY_DISABLED:"1",HOSTNAME:"127.0.0.1",PORT:String(port),
       PGLITE_DATA_DIR:dbDir,DATA_DIR:dataDir,DRIZZLE_MIGRATIONS_DIR:path.join(appRoot,"drizzle"),
-      MISHKEFET_ONNX_PATH: (() => {
-        const exeDir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath);
-        const nested = path.join(exeDir,"models","mishkefet","backbone.fp16.onnx");
-        const flat = path.join(exeDir,"backbone.fp16.onnx");
-        return fs.existsSync(nested) ? nested : fs.existsSync(flat) ? flat : nested;
-      })(),
+      MISHKEFET_ONNX_PATH: selectedModelPath || path.join(exeDir,"models","mishkefet","backbone.fp16.onnx"),
       UV_THREADPOOL_SIZE:"2",OMP_NUM_THREADS:"2",OMP_WAIT_POLICY:"PASSIVE",KMP_BLOCKTIME:"0",OPENBLAS_NUM_THREADS:"1",MKL_NUM_THREADS:"1"
     }});
     serverProcess.stdout.pipe(log);serverProcess.stderr.pipe(log);
@@ -501,10 +552,18 @@ if (Test-Path $standaloneNextPackage) {
   Remove-Item -LiteralPath $standaloneNextPackage -Recurse -Force
 }
 Copy-Item -LiteralPath $sourceNextPackage -Destination $standaloneNextPackage -Recurse -Force
+$nextPackageInfo = Get-Content -LiteralPath (Join-Path $standaloneNextPackage "package.json") -Raw | ConvertFrom-Json
+if (-not $nextPackageInfo.version) { throw "The copied Next.js package does not declare a version." }
+Write-Host "Installing the complete production dependency tree for Next.js $($nextPackageInfo.version) into the standalone runtime."
+Invoke-Checked "npm" @(
+  "install", "--prefix", $standalone, "--no-save", "--no-package-lock",
+  "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund",
+  "next@$($nextPackageInfo.version)"
+) "Installing Next.js runtime dependencies into the standalone package failed."
 Push-Location $standalone
 try {
-  node -e "const p=require.resolve('next/package.json');console.log('Packaged Next.js resolved from: '+p);"
-  if ($LASTEXITCODE -ne 0) { throw "The packaged Next.js dependency cannot be resolved from the standalone runtime." }
+  node -e "const p=require.resolve('next/package.json');const swc=require.resolve('@swc/helpers/_/_interop_require_default');require('next');console.log('Packaged Next.js and runtime dependencies loaded:',p,'; SWC:',swc);"
+  if ($LASTEXITCODE -ne 0) { throw "Next.js or one of its runtime dependencies cannot be loaded from the standalone runtime." }
 } finally {
   Pop-Location
 }
@@ -649,7 +708,7 @@ if (-not (Test-Path (Join-Path $runtimeDir ".next/static/chunks"))) {
 # Repeat Node's module-resolution check from the exact final server directory.
 Push-Location $runtimeDir
 try {
-  node -e "const p=require.resolve('next');const n=require('next/package.json').version;console.log('Final packaged Next.js OK:',n,'resolved to',p)"
+  node -e "const p=require.resolve('next');const n=require('next/package.json').version;require('next');require('@swc/helpers/_/_interop_require_default');console.log('Final packaged Next.js and SWC dependencies loaded:',n,'resolved to',p)"
   if ($LASTEXITCODE -ne 0) { throw "The final packaged runtime cannot resolve the Next.js framework package." }
 } finally {
   Pop-Location
@@ -657,13 +716,13 @@ try {
 @"
 הפעלת הזיהוי האוטומטי:
 1. חלץ את תיקיית KtavYad ושמור על מבנה התיקיות.
-2. בתוך תיקיית Application צור תיקייה בשם models ובתוכה mishkefet.
-3. העתק לשם את backbone.fp16.onnx מהגרסה הקודמת. אפשר גם להעתיק אותו ישירות לצד KtavYad.exe.
-הנתיב המועדף:
-KtavYad\Application\models\mishkefet\backbone.fp16.onnx
+2. הפעל את Application\KtavYad.exe.
+3. בהפעלה הראשונה תתבקש לבחור את קובץ backbone.fp16.onnx. התוכנה תעתיק אותו אוטומטית לתיקייה המתאימה. אין צורך לפתוח תיקיות או להעתיק ידנית.
+4. בהפעלות הבאות התוכנה תשתמש בקובץ שכבר נשמר.
 
-קובצי העזר הקטנים (charset.json, charlm.bin, words.bin, head.bin) כלולים בתיקיית Application.
-הפעל את Application\KtavYad.exe. אין צורך להתקין Node.js או Python.
+קובצי העזר הקטנים (charset.json, charlm.bin, words.bin, head.bin) כלולים בחבילה ונבדקים אוטומטית.
+אם תיקיית Application מוגנת לכתיבה, קובץ המודל יישמר בתיקיית הנתונים של המשתמש.
+אין צורך להתקין Node.js או Python.
 "@ | Set-Content -Path (Join-Path $packageDir "README-Model.txt") -Encoding utf8
 Write-Host "APPLICATION EXE: $finalExe"
 Write-Host "EXE_SIZE_BYTES: $((Get-Item $finalExe).Length)"
