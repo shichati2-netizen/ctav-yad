@@ -339,6 +339,8 @@ async function ensureModelFile(exeDir, dataRoot) {
   return destination;
 }
 function freePort() {
+  const requested=Number.parseInt(process.env.CTAV_FIXED_PORT||"",10);
+  if(Number.isInteger(requested)&&requested>0&&requested<65536)return Promise.resolve(requested);
   return new Promise((resolve,reject)=>{
     const s=net.createServer(); s.once("error",reject);
     s.listen(0,"127.0.0.1",()=>{const a=s.address();const p=a&&typeof a==="object"?a.port:null;s.close(e=>e?reject(e):p?resolve(p):reject(new Error("Could not allocate port"))) });
@@ -355,7 +357,7 @@ async function waitForServer(url, logFile) {
   throw new Error("השרת המקומי לא עלה בזמן. יומן: "+logFile);
 }
 app.whenReady().then(async()=>{
-  mainWindow=new BrowserWindow({width:1280,height:900,minWidth:900,minHeight:650,show:true,
+  mainWindow=new BrowserWindow({width:1280,height:900,minWidth:900,minHeight:650,show:process.env.CTAV_SMOKE_TEST!=="1",
     autoHideMenuBar:true,title:"כתב יד",backgroundColor:"#111827",
     webPreferences:{contextIsolation:true,nodeIntegration:false,sandbox:true}});
   try{
@@ -390,6 +392,10 @@ app.whenReady().then(async()=>{
     setBelowNormal(serverProcess.pid);
     await waitForServer(baseUrl,logFile);
     if(!quitting&&mainWindow&&!mainWindow.isDestroyed())await mainWindow.loadURL(baseUrl);
+    if(process.env.CTAV_SMOKE_TEST_MARKER){
+      fs.mkdirSync(path.dirname(process.env.CTAV_SMOKE_TEST_MARKER),{recursive:true});
+      fs.writeFileSync(process.env.CTAV_SMOKE_TEST_MARKER,JSON.stringify({baseUrl,pid:process.pid,serverPid:serverProcess&&serverProcess.pid,loadedAt:new Date().toISOString()}));
+    }
   }catch(e){const message=e instanceof Error?e.message:String(e);setStatus("ההפעלה נכשלה: "+message);dialog.showErrorBox("כתב יד - שגיאה בהפעלה",message)}
 });
 app.on("before-quit",()=>{quitting=true;if(serverProcess&&serverProcess.exitCode===null)serverProcess.kill()});
