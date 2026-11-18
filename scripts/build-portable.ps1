@@ -619,6 +619,20 @@ Move-Item -LiteralPath $builderOutput -Destination $applicationDir
 $finalExe = Join-Path $applicationDir "KtavYad.exe"
 $runtimeServer = Join-Path $applicationDir "resources/runtime/server.js"
 $runtimeDir = Join-Path $applicationDir "resources/runtime"
+
+# The Next.js trace may leave an unused .next/node_modules directory containing
+# broken junctions. Runtime module resolution uses runtime/node_modules instead.
+$unusedTraceModules = Join-Path $runtimeDir ".next/node_modules"
+$traceModulesItem = Get-Item -LiteralPath $unusedTraceModules -Force -ErrorAction SilentlyContinue
+if ($traceModulesItem) {
+  Write-Host "Removing unused Next.js trace module directory before zipping."
+  if ($traceModulesItem.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
+    & cmd.exe /c rmdir "$unusedTraceModules"
+    if ($LASTEXITCODE -ne 0) { throw "Could not remove unused Next.js trace junction: $unusedTraceModules" }
+  } else {
+    Remove-Item -LiteralPath $unusedTraceModules -Recurse -Force
+  }
+}
 $runtimeNextPackage = Join-Path $runtimeDir "node_modules/next/package.json"
 if (-not (Test-Path $finalExe)) { throw "KtavYad.exe was not produced in the final application folder." }
 if (-not (Test-Path $runtimeServer)) { throw "The server runtime folder was not copied into resources/runtime." }
