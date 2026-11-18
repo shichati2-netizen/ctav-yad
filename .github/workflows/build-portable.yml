@@ -124,8 +124,7 @@ jobs:
           $extractCheck = Join-Path $env:RUNNER_TEMP "ktavyad-zip-check"
           if (Test-Path $extractCheck) { Remove-Item -LiteralPath $extractCheck -Recurse -Force }
           $checkNodeModules = Join-Path $extractCheck "node_modules"
-          $checkNextDir = Join-Path $checkNodeModules "next"
-          New-Item -ItemType Directory -Force -Path (Join-Path $checkNextDir "dist/server") | Out-Null
+          New-Item -ItemType Directory -Force -Path $checkNodeModules | Out-Null
           try {
             $entries = @($checkArchive.Entries | ForEach-Object { $_.FullName })
             $requiredEntries = @(
@@ -134,30 +133,39 @@ jobs:
               "KtavYad/Application/resources/runtime/server.js"
               "KtavYad/Application/resources/runtime/node_modules/next/package.json"
               "KtavYad/Application/resources/runtime/node_modules/next/dist/server/next.js"
+              "KtavYad/Application/resources/runtime/node_modules/@swc/helpers/package.json"
             )
             foreach ($requiredEntry in $requiredEntries) {
               if (-not ($entries -contains $requiredEntry)) {
                 throw "Release ZIP is missing required entry: $requiredEntry"
               }
             }
-            $packageEntry = $checkArchive.GetEntry("KtavYad/Application/resources/runtime/node_modules/next/package.json")
-            $mainEntry = $checkArchive.GetEntry("KtavYad/Application/resources/runtime/node_modules/next/dist/server/next.js")
-            if ($mainEntry.Length -lt 1) { throw "ZIP's Next.js main entry is empty." }
-            if ($mainEntry.Length -ne $nextEntryInfo.Length) { throw "ZIP's Next.js main entry size differs from the packaged source file." }
-            foreach ($sourceEntry in @($packageEntry,$mainEntry)) {
-              $relative = $sourceEntry.FullName.Substring("KtavYad/Application/resources/runtime/".Length).Replace('/',[System.IO.Path]::DirectorySeparatorChar)
-              $destination = Join-Path $extractCheck $relative
+            $nextEntryInZip = $checkArchive.GetEntry("KtavYad/Application/resources/runtime/node_modules/next/dist/server/next.js")
+            if ($nextEntryInZip.Length -lt 1) { throw "ZIP's Next.js main entry is empty." }
+            if ($nextEntryInZip.Length -ne $nextEntryInfo.Length) { throw "ZIP's Next.js main entry size differs from the packaged source file." }
+
+            # Extract ALL node_modules files from the real ZIP. A successful
+            # require.resolve('next') alone does not prove Next's dependencies exist.
+            $modulePrefix = "KtavYad/Application/resources/runtime/node_modules/"
+            $moduleEntries = @($checkArchive.Entries | Where-Object {
+              $_.FullName.StartsWith($modulePrefix,[System.StringComparison]::OrdinalIgnoreCase)
+            })
+            foreach ($sourceEntry in $moduleEntries) {
+              if ([string]::IsNullOrEmpty($sourceEntry.Name)) { continue }
+              $relative = $sourceEntry.FullName.Substring($modulePrefix.Length).Replace('/',[System.IO.Path]::DirectorySeparatorChar)
+              $destination = Join-Path $checkNodeModules $relative
               New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
               $inputStream = $sourceEntry.Open()
               $outputStream = [System.IO.File]::Open($destination,[System.IO.FileMode]::Create,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
               try { $inputStream.CopyTo($outputStream) } finally { $outputStream.Dispose(); $inputStream.Dispose() }
             }
+            Write-Host "Extracted $($moduleEntries.Count) node_modules ZIP entries for real dependency validation."
           } finally {
             $checkArchive.Dispose()
           }
           $env:CTAV_ZIP_CHECK_NODE_MODULES = $checkNodeModules
-          node -e "const fs=require('fs'),path=require('path'),root=process.env.CTAV_ZIP_CHECK_NODE_MODULES,pkg=require(path.join(root,'next','package.json')),resolved=require.resolve('next',{paths:[root]});if(!pkg.main)throw new Error('Next.js package.json has no main entry');if(path.resolve(path.dirname(path.join(root,'next','package.json')),pkg.main)!==path.resolve(resolved))throw new Error('Next.js main path mismatch');if(!fs.statSync(resolved).isFile()||fs.statSync(resolved).size===0)throw new Error('Next.js main file is missing or empty after ZIP extraction: '+resolved);console.log('ZIP extraction check passed:',resolved,'('+fs.statSync(resolved).size+' bytes)')"
-          if ($LASTEXITCODE -ne 0) { throw "Next.js cannot be resolved from the extracted ZIP contents." }
+          node -e "const path=require('path'),root=process.env.CTAV_ZIP_CHECK_NODE_MODULES,pkg=require(path.join(root,'next','package.json')),resolved=require.resolve('next',{paths:[root]});if(!pkg.main)throw new Error('Next.js package.json has no main entry');if(path.resolve(path.dirname(path.join(root,'next','package.json')),pkg.main)!==path.resolve(resolved))throw new Error('Next.js main path mismatch');require(resolved);const swc=require.resolve('@swc/helpers/_/_interop_require_default',{paths:[root]});require(swc);console.log('Full ZIP runtime dependency test passed:',resolved,'; SWC:',swc)"
+          if ($LASTEXITCODE -ne 0) { throw "Next.js or one of its runtime dependencies cannot be loaded from the extracted ZIP contents." }
           $modelInAppZip = @($entries | Where-Object { $_.EndsWith("backbone.fp16.onnx",[System.StringComparison]::OrdinalIgnoreCase) })
           if ($modelInAppZip.Count -gt 0) { throw "The large ONNX model must be a separate Release asset, not inside the application ZIP." }
           $zip = Get-Item -LiteralPath $zipPath
@@ -194,7 +202,7 @@ jobs:
             **התקנה והפעלה**
             1. הורידו וחלצו את KtavYad-Windows.zip.
             2. הפעילו את KtavYad/Application/KtavYad.exe.
-            3. להפעלת זיהוי כתב יד, העתיקו את backbone.fp16.onnx לתיקיית KtavYad/Application/models/mishkefet/.
+            3. בהפעלה הראשונה בחרו בחלון שייפתח את קובץ backbone.fp16.onnx; התוכנה תעתיק אותו אוטומטית למיקום המתאים.
 
             קובץ המודל הגדול מצורף בנפרד ל-Release בשם backbone.fp16.onnx ואינו נכלל ב-ZIP. קובצי העזר הקטנים כלולים בחבילה.
             רישיון המודל: CC BY-NC-SA 4.0; שימוש מסחרי אסור. קובץ הרישיון מצורף בנפרד.
