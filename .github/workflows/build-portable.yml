@@ -6,6 +6,7 @@ on:
     paths:
       - self-training-hebrew-handwriting-ocr.zip
       - scripts/build-portable.ps1
+      - scripts/test-portable-exe.ps1
       - .github/workflows/build-portable.yml
 
 permissions:
@@ -54,6 +55,11 @@ jobs:
               "The model weights and derivatives may not be used commercially. See the model repository for full terms and attribution."
             ) | Set-Content -Path $licenseTarget -Encoding utf8
           }
+
+      - name: Smoke-test packaged Windows EXE with the real ONNX model
+        shell: pwsh
+        timeout-minutes: 10
+        run: ./scripts/test-portable-exe.ps1
 
       - name: Create and verify application ZIP
         shell: pwsh
