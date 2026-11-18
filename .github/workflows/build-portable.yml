@@ -12,6 +12,12 @@ on:
 permissions:
   contents: write
 
+# Keep only the newest build for this branch active. Avoid two concurrent
+# runs racing to publish different builds as separate Releases.
+concurrency:
+  group: ktavyad-windows-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -192,6 +198,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ github.token }}
           tag_name: v1.0.${{ github.run_number }}
           name: KtavYad v1.0.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
