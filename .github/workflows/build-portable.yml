@@ -60,10 +60,10 @@ jobs:
         run: |
           $packageDir = Join-Path $env:GITHUB_WORKSPACE "dist/KtavYad"
           $runtimeDir = Join-Path $packageDir "Application/resources/runtime"
-          $exePath = Join-Path $packageDir "KtavYad/Application/KtavYad.exe"
+          $exePath = Join-Path $packageDir "Application/KtavYad.exe"
           $nextPackage = Join-Path $runtimeDir "node_modules/next/package.json"
           $nextEntry = Join-Path $runtimeDir "node_modules/next/dist/server/next.js"
-          $readmePath = Join-Path $packageDir "KtavYad/README-Model.txt"
+          $readmePath = Join-Path $packageDir "README-Model.txt"
           foreach ($requiredFile in @($exePath,$nextPackage,$nextEntry,$readmePath)) {
             if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
               throw "Required application file is missing before ZIP creation: $requiredFile"
@@ -119,8 +119,8 @@ jobs:
           try {
             $entries = @($checkArchive.Entries | ForEach-Object { $_.FullName })
             $requiredEntries = @(
-              "README-Model.txt"
-              "Application/KtavYad.exe"
+              "KtavYad/README-Model.txt"
+              "KtavYad/Application/KtavYad.exe"
               "KtavYad/Application/resources/runtime/server.js"
               "KtavYad/Application/resources/runtime/node_modules/next/package.json"
               "KtavYad/Application/resources/runtime/node_modules/next/dist/server/next.js"
