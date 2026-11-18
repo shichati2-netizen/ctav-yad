@@ -541,7 +541,9 @@ $env:NEXT_TELEMETRY_DISABLED = "1"
 Invoke-Checked "npx" @("drizzle-kit", "generate", "--config=drizzle.config.ts") "Generating local database migrations failed."
 if (-not (Test-Path (Join-Path $source "drizzle/meta/_journal.json"))) { throw "Drizzle migration journal was not generated." }
 
-Invoke-Checked "npm" @("run", "build") "Next.js production build failed."
+# Turbopack hashed external-module aliases can become unresolvable after standalone dependency restoration.
+# Use the documented Webpack workaround so runtime package names remain stable across packaging.
+Invoke-Checked "npm" @("run", "build", "--", "--webpack") "Next.js production build failed."
 $standalone = Join-Path $source ".next/standalone"
 if (-not (Test-Path (Join-Path $standalone "server.js"))) { throw "Next.js standalone server was not produced." }
 
