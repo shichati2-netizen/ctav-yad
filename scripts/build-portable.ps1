@@ -548,51 +548,6 @@ Invoke-Checked "npm" @("run", "build") "Next.js production build failed."
 $standalone = Join-Path $source ".next/standalone"
 if (-not (Test-Path (Join-Path $standalone "server.js"))) { throw "Next.js standalone server was not produced." }
 
-# Turbopack references external packages through a content-hashed alias such as
-# onnxruntime-node-<hash>. The standalone output may contain a broken symlink or
-# omit the alias after dependencies are restored. Create a real wrapper package
-# at the exact alias path, forwarding to the real package in node_modules.
-$standaloneServerChunks = Join-Path $standalone ".next/server/chunks"
-if (-not (Test-Path $standaloneServerChunks)) {
-  throw "Turbopack server chunks are missing; cannot validate external package aliases."
-}
-$onnxAliases = @()
-$aliasRegex = [regex]::new('onnxruntime-node-[0-9a-f]{8,32}',[System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-foreach ($chunk in Get-ChildItem -LiteralPath $standaloneServerChunks -Recurse -File -Filter "*.js") {
-  $chunkText = [System.IO.File]::ReadAllText($chunk.FullName)
-  foreach ($match in $aliasRegex.Matches($chunkText)) {
-    $onnxAliases += $match.Value
-  }
-}
-$onnxAliases = @($onnxAliases | Sort-Object -Unique)
-if ($onnxAliases.Count -lt 1) {
-  throw "Turbopack output did not contain the expected onnxruntime-node external alias."
-}
-$standaloneTraceModules = Join-Path $standalone ".next/node_modules"
-New-Item -ItemType Directory -Force -Path $standaloneTraceModules | Out-Null
-foreach ($alias in $onnxAliases) {
-  $aliasDir = Join-Path $standaloneTraceModules $alias
-  $existingAlias = Get-Item -LiteralPath $aliasDir -Force -ErrorAction SilentlyContinue
-  if ($existingAlias) {
-    if (($existingAlias.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-      if (($existingAlias.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
-        & cmd.exe /c rmdir "$aliasDir"
-      } else {
-        Remove-Item -LiteralPath $aliasDir -Force
-      }
-      if ($LASTEXITCODE -ne 0) { throw "Could not remove broken Turbopack alias link: $aliasDir" }
-    } else {
-      Remove-Item -LiteralPath $aliasDir -Recurse -Force
-    }
-  }
-  New-Item -ItemType Directory -Force -Path $aliasDir | Out-Null
-  @{ name = $alias; version = "1.0.0"; main = "index.cjs"; type = "commonjs" } |
-    ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $aliasDir "package.json") -Encoding utf8
-  'module.exports = require("onnxruntime-node");' |
-    Set-Content -LiteralPath (Join-Path $aliasDir "index.cjs") -Encoding utf8
-}
-Write-Host "Restored Turbopack ONNX external aliases as real wrappers: $($onnxAliases -join ', ')"
-
 # Next.js standalone tracing can omit the Next.js package itself in this generated
 # desktop bundle. Ensure the runtime has Next.js at the exact location server.js resolves.
 $standaloneNodeModules = Join-Path $standalone "node_modules"
@@ -641,6 +596,284 @@ foreach ($helper in @("_interop_require_default.js","_interop_require_wildcard.j
   }
 }
 Write-Host "Restored @swc/helpers $standaloneSwcVersion ESM files for Node module-sync resolution."
+
+# Resolve every Turbopack content-hashed external module alias used by the
+# server chunks. Next 16 may emit aliases for onnxruntime-node, jpeg-js, and
+# other production packages. Keep a real wrapper package for each one.
+$standaloneServerChunks = Join-Path $standalone ".next/server/chunks"
+if (-not (Test-Path $standaloneServerChunks)) {
+  throw "Turbopack server chunks are missing; cannot validate external package aliases."
+}
+$turbopackAliases = @()
+$aliasRegex = [regex]::new('(?<alias>(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+-[0-9a-f]{8,32})',[System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+foreach ($chunk in Get-ChildItem -LiteralPath $standaloneServerChunks -Recurse -File -Filter "*.js") {
+  $chunkText = [System.IO.File]::ReadAllText($chunk.FullName)
+  foreach ($match in $aliasRegex.Matches($chunkText)) {
+    $alias = $match.Groups["alias"].Value
+    $packageName = [regex]::Replace($alias,'-[0-9a-f]{8,32}
+Push-Location $standalone
+try {
+  node -e "const p=require.resolve('next/package.json');const swc=require.resolve('@swc/helpers/_/_interop_require_default');const helper=require('@swc/helpers/_/_interop_require_default');const wildcard=require('@swc/helpers/_/_interop_require_wildcard');require('next');console.log('Packaged Next.js and SWC ESM dependencies loaded:',p,'; SWC:',swc,'; helpers:',typeof helper._,typeof wildcard._);"
+  if ($LASTEXITCODE -ne 0) { throw "Next.js or one of its runtime dependencies cannot be loaded from the standalone runtime." }
+} finally {
+  Pop-Location
+}
+
+# Copy assets that Next.js standalone intentionally leaves outside the traced server bundle.
+New-Item -ItemType Directory -Force -Path (Join-Path $standalone "public") | Out-Null
+Copy-Item -Path (Join-Path $source "public/*") -Destination (Join-Path $standalone "public") -Recurse -Force
+$staticDest = Join-Path $standalone ".next/static"
+New-Item -ItemType Directory -Force -Path $staticDest | Out-Null
+Copy-Item -Path (Join-Path $source ".next/static/*") -Destination $staticDest -Recurse -Force
+Copy-Item -Path (Join-Path $source "models") -Destination $standalone -Recurse -Force
+Copy-Item -Path (Join-Path $source "drizzle") -Destination $standalone -Recurse -Force
+$sourceOrtBin = Join-Path $source "node_modules/onnxruntime-node/bin"
+$standaloneOrtBin = Join-Path $standalone "node_modules/onnxruntime-node/bin"
+New-Item -ItemType Directory -Force -Path $standaloneOrtBin | Out-Null
+Copy-Item -Path (Join-Path $sourceOrtBin "*") -Destination $standaloneOrtBin -Recurse -Force
+$ortRelativePath = [System.IO.Path]::GetRelativePath($sourceOrtBin, $ortDll)
+$standaloneOrtDll = Join-Path $standaloneOrtBin $ortRelativePath
+if (-not (Test-Path $standaloneOrtDll)) {
+  throw "The matching ONNX native DLL was not copied into the Next.js standalone package: $ortRelativePath"
+}
+
+# The standalone server is copied directly into resources/app; no runtime extraction is needed.
+
+# Validate model files and load the ONNX graph with the Windows native runtime.
+Push-Location $standalone
+try {
+  node -e "const fs=require('fs');const p='models/mishkefet';const c=JSON.parse(fs.readFileSync(p+'/charset.json','utf8'));if(!Array.isArray(c)||c.length!==198)throw new Error('Unexpected charset');const h=fs.readFileSync(p+'/head.bin');if(h.toString('ascii',0,4)!=='MKH1')throw new Error('Invalid head.bin');for(const f of ['charlm.bin','words.bin'])if(fs.statSync(p+'/'+f).size<1000)throw new Error('Invalid '+f);if(fs.existsSync(p+'/backbone.fp16.onnx'))throw new Error('ONNX model should not be bundled');console.log('Model support assets OK; charset='+c.length+'; ONNX graph excluded');"
+  if ($LASTEXITCODE -ne 0) { throw "Model asset verification failed." }
+
+  # Run Node from a clean directory with the package's own DLL beside node.exe.
+  # This reproduces the executable-directory-first DLL lookup used by the packaged Electron app.
+  $smokeNodeDir = Join-Path $env:RUNNER_TEMP "node-with-bundled-ort"
+  New-Item -ItemType Directory -Force -Path $smokeNodeDir | Out-Null
+  $nodeExe = (Get-Command node).Source
+  Copy-Item -LiteralPath $nodeExe -Destination (Join-Path $smokeNodeDir "node.exe") -Force
+  Copy-Item -LiteralPath (Join-Path $runtimeNativeDir "ctavort.dll") -Destination (Join-Path $smokeNodeDir "ctavort.dll") -Force
+
+  $loadedOrtDll = Join-Path $smokeNodeDir "ctavort.dll"
+  $loadedOrtVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($loadedOrtDll).FileVersion
+  Write-Host "Smoke-test executable: $(Join-Path $smokeNodeDir 'node.exe')"
+  Write-Host "Smoke-test ONNX DLL: $loadedOrtVersion"
+
+  $env:CTAV_TURBOPACK_ALIASES = ($turbopackAliases | ForEach-Object { $_.Alias }) -join ";"
+  & (Join-Path $smokeNodeDir "node.exe") -e "const path=require('path'),{createRequire}=require('module'),req=createRequire(path.join(process.cwd(),'.next','server','chunks','__aliascheck__.cjs')),aliases=(process.env.CTAV_TURBOPACK_ALIASES||'').split(';').filter(Boolean);for(const alias of aliases){const target=req.resolve(alias);const mod=req(alias);if(alias.startsWith('onnxruntime-node-')&&(!mod.InferenceSession||typeof mod.InferenceSession.create!=='function'))throw new Error('Invalid ONNX alias export: '+alias);console.log('Turbopack alias loaded:',alias,'=>',target)}"
+  if ($LASTEXITCODE -ne 0) { throw "A Turbopack hashed external package alias could not be resolved or loaded." }
+  Remove-Item Env:CTAV_TURBOPACK_ALIASES -ErrorAction SilentlyContinue
+
+  & (Join-Path $smokeNodeDir "node.exe") -e "const ort=require('onnxruntime-node');if(!ort.InferenceSession||typeof ort.InferenceSession.create!=='function')throw new Error('ONNX binding unavailable');console.log('ONNX native binding loaded; graph supplied externally.');"
+  if ($LASTEXITCODE -ne 0) { throw "ONNX Runtime native binding could not load using the package-matched DLL." }
+
+  if (-not (Test-Path "public/tessdata/heb.traineddata")) { throw "Hebrew Tesseract data is missing." }
+
+  # Start the standalone server once to verify migrations and the embedded local database.
+  $env:CTAV_BUILD_MODE = ""
+  $env:PGLITE_DATA_DIR = Join-Path $env:RUNNER_TEMP "ctav-yad-smoke-db"
+  $env:DATA_DIR = Join-Path $env:RUNNER_TEMP "ctav-yad-smoke-data"
+  $env:PORT = "32191"
+  $env:HOSTNAME = "127.0.0.1"
+  $stdout = Join-Path $env:RUNNER_TEMP "ctav-server-out.log"
+  $stderr = Join-Path $env:RUNNER_TEMP "ctav-server-err.log"
+  $proc = Start-Process -FilePath (Join-Path $smokeNodeDir "node.exe") -ArgumentList @("server.js") -WorkingDirectory $standalone -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+  try {
+    $ready = $false
+    for ($i = 0; $i -lt 120; $i++) {
+      if ($proc.HasExited) { break }
+      try {
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:32191/api/health" -TimeoutSec 3
+        if ($response.StatusCode -eq 200) { $ready = $true; break }
+      } catch {}
+      Start-Sleep -Seconds 1
+    }
+    if (-not $ready) {
+      if (Test-Path $stdout) { Get-Content $stdout | Write-Host }
+      if (Test-Path $stderr) { Get-Content $stderr | Write-Host }
+      throw "Portable server did not become healthy. See logs above."
+    }
+    $baseUrl = "http://127.0.0.1:32191"
+    $homeResponse = Invoke-WebRequest -Uri "$baseUrl/" -TimeoutSec 20
+    if ($homeResponse.StatusCode -ne 200) { throw "Packaged homepage did not return HTTP 200." }
+    $modelCheck = Invoke-WebRequest -Uri "$baseUrl/api/mishkefet/ready" -TimeoutSec 20
+    $modelState = $modelCheck.Content | ConvertFrom-Json
+    if ($modelState.exists -ne $false) { throw "The build smoke-test unexpectedly found a bundled ONNX backbone." }
+    Write-Host "External ONNX model path is reported as missing without crashing the server: $($modelState.modelPath)"
+    $chunkRoot = Join-Path $standalone ".next/static/chunks"
+    if (-not (Test-Path $chunkRoot)) { throw "Next.js static chunks folder is missing." }
+    $chunkFiles = @(Get-ChildItem $chunkRoot -Recurse -File -Filter "*.js")
+    if ($chunkFiles.Count -lt 1) { throw "No Next.js JavaScript chunks were produced." }
+    foreach ($chunk in $chunkFiles) {
+      $relative = $chunk.FullName.Substring($chunkRoot.Length).TrimStart([char[]]"\/").Replace("\","/")
+      $chunkResponse = Invoke-WebRequest -Uri "$baseUrl/_next/static/chunks/$relative" -TimeoutSec 20
+      if ($chunkResponse.StatusCode -ne 200) { throw "Static JS chunk failed: $relative" }
+    }
+    foreach ($asset in @("tesseract/worker.min.js","tessdata/heb.traineddata")) {
+      $assetPath = Join-Path (Join-Path $standalone "public") ($asset.Replace("/","\"))
+      if (Test-Path $assetPath) {
+        $assetResponse = Invoke-WebRequest -Uri "$baseUrl/$asset" -TimeoutSec 30
+        if ($assetResponse.StatusCode -ne 200) { throw "OCR public asset failed: $asset" }
+      }
+    }
+    Write-Host "Standalone app, database, homepage, $($chunkFiles.Count) JS chunks and OCR static assets passed."
+  } finally {
+    if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+  }
+} finally {
+  Pop-Location
+}
+
+# Electron Builder writes the complete unpacked application directly to dist/KtavYad.
+# No second recursive PowerShell copy is needed.
+Set-Location $source
+Invoke-Checked "npx" @("electron-builder", "--win", "--dir", "--x64") "electron-builder directory packaging failed."
+$builderOutput = Join-Path $packageDir "win-unpacked"
+if (-not (Test-Path (Join-Path $builderOutput "KtavYad.exe"))) {
+  throw "Electron Builder did not produce the expected win-unpacked/KtavYad.exe."
+}
+$applicationDir = Join-Path $packageDir "Application"
+if (Test-Path $applicationDir) { Remove-Item -LiteralPath $applicationDir -Recurse -Force }
+Move-Item -LiteralPath $builderOutput -Destination $applicationDir
+$finalExe = Join-Path $applicationDir "KtavYad.exe"
+$runtimeServer = Join-Path $applicationDir "resources/runtime/server.js"
+$runtimeDir = Join-Path $applicationDir "resources/runtime"
+
+# Recreate the real wrapper directories in the final Electron resources;
+# electron-builder may copy broken trace junctions and the ZIP walker skips links.
+$unusedTraceModules = Join-Path $runtimeDir ".next/node_modules"
+Write-TurbopackAliasWrappers $unusedTraceModules
+$runtimeNextPackage = Join-Path $runtimeDir "node_modules/next/package.json"
+if (-not (Test-Path $finalExe)) { throw "KtavYad.exe was not produced in the final application folder." }
+if (-not (Test-Path $runtimeServer)) { throw "The server runtime folder was not copied into resources/runtime." }
+if (-not (Test-Path $runtimeNextPackage)) {
+  throw "The final Electron package is missing resources/runtime/node_modules/next/package.json. Refusing to publish a broken app."
+}
+if (-not (Test-Path (Join-Path $runtimeDir ".next/static/chunks"))) {
+  throw "The Next.js static chunks folder is missing from resources/runtime."
+}
+
+# Electron Builder can omit transitive runtime packages from extraResources.
+# Replace its partial runtime/node_modules with the complete, production-tested
+# standalone dependency tree produced above. This keeps every package and its
+# package.json together (Next.js, @next/env, SWC, and their transitive dependencies).
+$runtimeNodeModules = Join-Path $runtimeDir "node_modules"
+if (-not (Test-Path $standaloneNodeModules)) {
+  throw "The tested standalone node_modules directory is missing."
+}
+$standaloneNextEnv = Join-Path $standaloneNodeModules "@next/env/package.json"
+if (-not (Test-Path $standaloneNextEnv -PathType Leaf)) {
+  throw "The standalone production dependency tree is missing @next/env/package.json."
+}
+if (Test-Path $runtimeNodeModules) {
+  Remove-Item -LiteralPath $runtimeNodeModules -Recurse -Force
+}
+Copy-Item -LiteralPath $standaloneNodeModules -Destination $runtimeNodeModules -Recurse -Force
+
+$runtimeNextPackage = Join-Path $runtimeNodeModules "next/package.json"
+$runtimeNextEnv = Join-Path $runtimeNodeModules "@next/env/package.json"
+$runtimeSwcPackage = Join-Path $runtimeNodeModules "@swc/helpers"
+$runtimeSwcPackageJson = Join-Path $runtimeSwcPackage "package.json"
+$runtimeSwcEsm = Join-Path $runtimeSwcPackage "esm"
+if (-not (Test-Path $runtimeNextPackage -PathType Leaf)) {
+  throw "Final Electron runtime is missing next/package.json after restoring standalone dependencies."
+}
+if (-not (Test-Path $runtimeNextEnv -PathType Leaf)) {
+  throw "Final Electron runtime is missing @next/env/package.json after restoring standalone dependencies."
+}
+if (-not (Test-Path $runtimeSwcPackageJson -PathType Leaf)) {
+  throw "Final Electron runtime is missing @swc/helpers/package.json."
+}
+$runtimeSwcVersion = (Get-Content $runtimeSwcPackageJson -Raw | ConvertFrom-Json).version
+if ($runtimeSwcVersion -ne $standaloneSwcVersion) {
+  throw "Final @swc/helpers version differs from the tested standalone package ($runtimeSwcVersion vs $standaloneSwcVersion)."
+}
+foreach ($helper in @("_interop_require_default.js","_interop_require_wildcard.js")) {
+  if (-not (Test-Path (Join-Path $runtimeSwcEsm $helper) -PathType Leaf)) {
+    throw "Final Electron runtime is missing @swc/helpers ESM file: $helper"
+  }
+}
+Write-Host "Restored complete standalone production dependency tree; Next.js, @next/env and @swc/helpers $runtimeSwcVersion are present."
+Push-Location $runtimeDir
+try {
+  node -e "const p=require.resolve('next');const n=require('next/package.json').version;const e=require.resolve('@next/env');const d=require('@swc/helpers/_/_interop_require_default');const w=require('@swc/helpers/_/_interop_require_wildcard');require('next');console.log('Final packaged runtime dependency tree loaded:',n,'resolved to',p,'; @next/env:',e,'; helper exports:',typeof d._,typeof w._)"
+  if ($LASTEXITCODE -ne 0) { throw "The final packaged runtime cannot load Next.js or its production dependencies." }
+} finally {
+  Pop-Location
+}
+@"
+הפעלת הזיהוי האוטומטי:
+1. חלץ את תיקיית KtavYad ושמור על מבנה התיקיות.
+2. הפעל את Application\KtavYad.exe.
+3. בהפעלה הראשונה תתבקש לבחור את קובץ backbone.fp16.onnx. התוכנה תעתיק אותו אוטומטית לתיקייה המתאימה. אין צורך לפתוח תיקיות או להעתיק ידנית.
+4. בהפעלות הבאות התוכנה תשתמש בקובץ שכבר נשמר.
+
+קובצי העזר הקטנים (charset.json, charlm.bin, words.bin, head.bin) כלולים בחבילה ונבדקים אוטומטית.
+אם תיקיית Application מוגנת לכתיבה, קובץ המודל יישמר בתיקיית הנתונים של המשתמש.
+אין צורך להתקין Node.js או Python.
+"@ | Set-Content -Path (Join-Path $packageDir "README-Model.txt") -Encoding utf8
+Write-Host "APPLICATION EXE: $finalExe"
+Write-Host "EXE_SIZE_BYTES: $((Get-Item $finalExe).Length)"
+Write-Host "APPLICATION FOLDER: $applicationDir"
+Write-Host "RUNTIME FOLDER: $(Join-Path $applicationDir 'resources/runtime')"
+Write-Host "MODEL SETUP GUIDE: $(Join-Path $packageDir 'README-Model.txt')"
+,'',[System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $packageRelative = $packageName.Replace("/",[System.IO.Path]::DirectorySeparatorChar)
+    $standalonePackage = Join-Path $standaloneNodeModules $packageRelative
+    $sourcePackage = Join-Path (Join-Path $source "node_modules") $packageRelative
+    if (-not (Test-Path (Join-Path $standalonePackage "package.json") -PathType Leaf)) {
+      if (Test-Path (Join-Path $sourcePackage "package.json") -PathType Leaf) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $standalonePackage -Parent) | Out-Null
+        if (Test-Path $standalonePackage) { Remove-Item -LiteralPath $standalonePackage -Recurse -Force }
+        Copy-Item -LiteralPath $sourcePackage -Destination $standalonePackage -Recurse -Force
+        Write-Host "Restored missing Turbopack dependency package: $packageName"
+      } else {
+        continue
+      }
+    }
+    if (-not ($turbopackAliases | Where-Object { $_.Alias -eq $alias })) {
+      $turbopackAliases += [pscustomobject]@{ Alias = $alias; Package = $packageName }
+    }
+  }
+}
+if ($turbopackAliases.Count -lt 1) {
+  throw "Turbopack emitted no resolvable hashed external module aliases."
+}
+$turbopackAliases = @($turbopackAliases | Sort-Object -Property Alias -Unique)
+Write-Host "Detected Turbopack aliases: $(($turbopackAliases | ForEach-Object { $_.Alias + ' -> ' + $_.Package }) -join '; ')"
+
+function Write-TurbopackAliasWrappers([string]$Root) {
+  $rootInfo = Get-Item -LiteralPath $Root -Force -ErrorAction SilentlyContinue
+  if ($rootInfo -and (($rootInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+    & cmd.exe /c rmdir "$Root"
+    if ($LASTEXITCODE -ne 0) { throw "Could not remove Turbopack trace junction: $Root" }
+  }
+  New-Item -ItemType Directory -Force -Path $Root | Out-Null
+  foreach ($entry in $turbopackAliases) {
+    $aliasDir = Join-Path $Root $entry.Alias
+    $existingAlias = Get-Item -LiteralPath $aliasDir -Force -ErrorAction SilentlyContinue
+    if ($existingAlias) {
+      if (($existingAlias.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if (($existingAlias.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+          & cmd.exe /c rmdir "$aliasDir"
+        } else {
+          Remove-Item -LiteralPath $aliasDir -Force
+        }
+        if ($LASTEXITCODE -ne 0) { throw "Could not remove Turbopack alias link: $aliasDir" }
+      } else {
+        Remove-Item -LiteralPath $aliasDir -Recurse -Force
+      }
+    }
+    New-Item -ItemType Directory -Force -Path $aliasDir | Out-Null
+    @{ name = $entry.Alias; version = "1.0.0"; main = "index.cjs"; type = "commonjs" } |
+      ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $aliasDir "package.json") -Encoding utf8
+    ('module.exports = require("' + $entry.Package + '");') |
+      Set-Content -LiteralPath (Join-Path $aliasDir "index.cjs") -Encoding utf8
+  }
+  Write-Host "Wrote $($turbopackAliases.Count) real Turbopack alias wrappers into $Root"
+}
+
+$standaloneTraceModules = Join-Path $standalone ".next/node_modules"
+Write-TurbopackAliasWrappers $standaloneTraceModules
 
 Push-Location $standalone
 try {
