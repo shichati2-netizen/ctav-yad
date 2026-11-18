@@ -228,19 +228,6 @@ $runtimeNativeDir = Join-Path $source "runtime-native"
 New-Item -ItemType Directory -Force -Path $runtimeNativeDir | Out-Null
 Copy-Item -Path (Join-Path $ortNativeDir "*") -Destination $runtimeNativeDir -Recurse -Force
 
-# Ship a regular Node.js runtime beside Electron. The app UI remains Electron,
-# while Next.js/ONNX run in the same standalone Node runtime used by CI smoke tests.
-$portableNodeDir = Join-Path $source "portable-node"
-New-Item -ItemType Directory -Force -Path $portableNodeDir | Out-Null
-$runnerNodeExe = (Get-Command node).Source
-Copy-Item -LiteralPath $runnerNodeExe -Destination (Join-Path $portableNodeDir "node.exe") -Force
-Copy-Item -Path (Join-Path $runtimeNativeDir "*") -Destination $portableNodeDir -Recurse -Force
-$nodeLicense = Join-Path (Split-Path $runnerNodeExe -Parent) "LICENSE"
-if (Test-Path -LiteralPath $nodeLicense -PathType Leaf) {
-  Copy-Item -LiteralPath $nodeLicense -Destination (Join-Path $portableNodeDir "LICENSE") -Force
-}
-& (Join-Path $portableNodeDir "node.exe") --version
-if ($LASTEXITCODE -ne 0) { throw "The bundled standalone Node.js runtime could not be executed." }
 
 Invoke-Checked "npm" @("install", "--save-dev", "electron", "electron-builder", "--no-audit", "--no-fund") "Installing Electron build tools failed."
 
@@ -261,7 +248,6 @@ $buildConfig = @{
   files = @("electron-main.cjs", "package.json")
   extraResources = @(
     @{ from = ".next/standalone"; to = "runtime" },
-    @{ from = "portable-node"; to = "node-runtime" },
     # Explicitly restore Next and SWC ESM files in the final Electron resources.
     @{ from = "node_modules/next"; to = "runtime/node_modules/next" },
     @{ from = ".next/standalone/node_modules/@swc/helpers/esm"; to = "runtime/node_modules/@swc/helpers/esm" }
@@ -396,14 +382,10 @@ app.whenReady().then(async()=>{
     if(!fs.existsSync(serverFile))throw new Error("קובצי השרת חסרים בתיקיית resources/runtime.");
     setStatus("הממשק מוכן. מפעיל את השרת המקומי…");
     const port=await freePort(), baseUrl="http://127.0.0.1:"+port, logFile=path.join(logsDir,"server.log"), log=fs.createWriteStream(logFile,{flags:"a"});
-    const nodeRuntimeFile=path.join(process.resourcesPath,"node-runtime","node.exe");
-    if(!fs.existsSync(nodeRuntimeFile))throw new Error("קובץ Node.js המצורף חסר: "+nodeRuntimeFile);
-    const nodeRuntimePath=path.dirname(nodeRuntimeFile);
-    serverProcess=spawn(nodeRuntimeFile,[serverFile],{cwd:appRoot,windowsHide:true,stdio:["ignore","pipe","pipe"],env:{
-      ...process.env,NODE_ENV:"production",NEXT_TELEMETRY_DISABLED:"1",HOSTNAME:"127.0.0.1",PORT:String(port),
+    serverProcess=spawn(process.execPath,[serverFile],{cwd:appRoot,windowsHide:true,stdio:["ignore","pipe","pipe"],env:{
+      ...process.env,ELECTRON_RUN_AS_NODE:"1",NODE_ENV:"production",NEXT_TELEMETRY_DISABLED:"1",HOSTNAME:"127.0.0.1",PORT:String(port),
       PGLITE_DATA_DIR:dbDir,DATA_DIR:dataDir,DRIZZLE_MIGRATIONS_DIR:path.join(appRoot,"drizzle"),
       MISHKEFET_ONNX_PATH: selectedModelPath || path.join(exeDir,"models","mishkefet","backbone.fp16.onnx"),
-      PATH:nodeRuntimePath+path.delimiter+(process.env.PATH||""),
       UV_THREADPOOL_SIZE:"2",OMP_NUM_THREADS:"2",OMP_WAIT_POLICY:"PASSIVE",KMP_BLOCKTIME:"0",OPENBLAS_NUM_THREADS:"1",MKL_NUM_THREADS:"1"
     }});
     serverProcess.stdout.pipe(log);serverProcess.stderr.pipe(log);
@@ -560,11 +542,56 @@ $env:NEXT_TELEMETRY_DISABLED = "1"
 Invoke-Checked "npx" @("drizzle-kit", "generate", "--config=drizzle.config.ts") "Generating local database migrations failed."
 if (-not (Test-Path (Join-Path $source "drizzle/meta/_journal.json"))) { throw "Drizzle migration journal was not generated." }
 
-# Turbopack hashed external-module aliases can become unresolvable after standalone dependency restoration.
-# Use the documented Webpack workaround so runtime package names remain stable across packaging.
-Invoke-Checked "npm" @("run", "build", "--", "--webpack") "Next.js production build failed."
+# Build with the same Turbopack runtime that passed the standalone PGlite smoke test.
+# Resolve its hashed external ONNX alias explicitly below instead of changing bundlers.
+Invoke-Checked "npm" @("run", "build") "Next.js production build failed."
 $standalone = Join-Path $source ".next/standalone"
 if (-not (Test-Path (Join-Path $standalone "server.js"))) { throw "Next.js standalone server was not produced." }
+
+# Turbopack references external packages through a content-hashed alias such as
+# onnxruntime-node-<hash>. The standalone output may contain a broken symlink or
+# omit the alias after dependencies are restored. Create a real wrapper package
+# at the exact alias path, forwarding to the real package in node_modules.
+$standaloneServerChunks = Join-Path $standalone ".next/server/chunks"
+if (-not (Test-Path $standaloneServerChunks)) {
+  throw "Turbopack server chunks are missing; cannot validate external package aliases."
+}
+$onnxAliases = @()
+$aliasRegex = [regex]::new('onnxruntime-node-[0-9a-f]{8,32}',[System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+foreach ($chunk in Get-ChildItem -LiteralPath $standaloneServerChunks -Recurse -File -Filter "*.js") {
+  $chunkText = [System.IO.File]::ReadAllText($chunk.FullName)
+  foreach ($match in $aliasRegex.Matches($chunkText)) {
+    $onnxAliases += $match.Value
+  }
+}
+$onnxAliases = @($onnxAliases | Sort-Object -Unique)
+if ($onnxAliases.Count -lt 1) {
+  throw "Turbopack output did not contain the expected onnxruntime-node external alias."
+}
+$standaloneTraceModules = Join-Path $standalone ".next/node_modules"
+New-Item -ItemType Directory -Force -Path $standaloneTraceModules | Out-Null
+foreach ($alias in $onnxAliases) {
+  $aliasDir = Join-Path $standaloneTraceModules $alias
+  $existingAlias = Get-Item -LiteralPath $aliasDir -Force -ErrorAction SilentlyContinue
+  if ($existingAlias) {
+    if (($existingAlias.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      if (($existingAlias.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+        & cmd.exe /c rmdir "$aliasDir"
+      } else {
+        Remove-Item -LiteralPath $aliasDir -Force
+      }
+      if ($LASTEXITCODE -ne 0) { throw "Could not remove broken Turbopack alias link: $aliasDir" }
+    } else {
+      Remove-Item -LiteralPath $aliasDir -Recurse -Force
+    }
+  }
+  New-Item -ItemType Directory -Force -Path $aliasDir | Out-Null
+  @{ name = $alias; version = "1.0.0"; main = "index.cjs"; type = "commonjs" } |
+    ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $aliasDir "package.json") -Encoding utf8
+  'module.exports = require("onnxruntime-node");' |
+    Set-Content -LiteralPath (Join-Path $aliasDir "index.cjs") -Encoding utf8
+}
+Write-Host "Restored Turbopack ONNX external aliases as real wrappers: $($onnxAliases -join ', ')"
 
 # Next.js standalone tracing can omit the Next.js package itself in this generated
 # desktop bundle. Ensure the runtime has Next.js at the exact location server.js resolves.
@@ -675,7 +702,7 @@ try {
   $env:HOSTNAME = "127.0.0.1"
   $stdout = Join-Path $env:RUNNER_TEMP "ctav-server-out.log"
   $stderr = Join-Path $env:RUNNER_TEMP "ctav-server-err.log"
-  $proc = Start-Process -FilePath (Get-Command node).Source -ArgumentList @("server.js") -WorkingDirectory $standalone -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+  $proc = Start-Process -FilePath (Join-Path $smokeNodeDir "node.exe") -ArgumentList @("server.js") -WorkingDirectory $standalone -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
   try {
     $ready = $false
     for ($i = 0; $i -lt 120; $i++) {
@@ -737,19 +764,37 @@ $finalExe = Join-Path $applicationDir "KtavYad.exe"
 $runtimeServer = Join-Path $applicationDir "resources/runtime/server.js"
 $runtimeDir = Join-Path $applicationDir "resources/runtime"
 
-# The Next.js trace may leave an unused .next/node_modules directory containing
-# broken junctions. Runtime module resolution uses runtime/node_modules instead.
+# Preserve the real Turbopack ONNX alias wrappers. Remove stale symlinks from
+# this trace directory without following them, then write plain package folders.
 $unusedTraceModules = Join-Path $runtimeDir ".next/node_modules"
 $traceModulesItem = Get-Item -LiteralPath $unusedTraceModules -Force -ErrorAction SilentlyContinue
-if ($traceModulesItem) {
-  Write-Host "Removing unused Next.js trace module directory before zipping."
-  if ($traceModulesItem.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
-    & cmd.exe /c rmdir "$unusedTraceModules"
-    if ($LASTEXITCODE -ne 0) { throw "Could not remove unused Next.js trace junction: $unusedTraceModules" }
-  } else {
-    Remove-Item -LiteralPath $unusedTraceModules -Recurse -Force
-  }
+if ($traceModulesItem -and (($traceModulesItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+  & cmd.exe /c rmdir "$unusedTraceModules"
+  if ($LASTEXITCODE -ne 0) { throw "Could not remove unused Next.js trace junction: $unusedTraceModules" }
 }
+New-Item -ItemType Directory -Force -Path $unusedTraceModules | Out-Null
+foreach ($alias in $onnxAliases) {
+  $aliasDir = Join-Path $unusedTraceModules $alias
+  $existingAlias = Get-Item -LiteralPath $aliasDir -Force -ErrorAction SilentlyContinue
+  if ($existingAlias) {
+    if (($existingAlias.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      if (($existingAlias.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+        & cmd.exe /c rmdir "$aliasDir"
+      } else {
+        Remove-Item -LiteralPath $aliasDir -Force
+      }
+      if ($LASTEXITCODE -ne 0) { throw "Could not remove final Turbopack alias junction: $aliasDir" }
+    } else {
+      Remove-Item -LiteralPath $aliasDir -Recurse -Force
+    }
+  }
+  New-Item -ItemType Directory -Force -Path $aliasDir | Out-Null
+  @{ name = $alias; version = "1.0.0"; main = "index.cjs"; type = "commonjs" } |
+    ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $aliasDir "package.json") -Encoding utf8
+  'module.exports = require("onnxruntime-node");' |
+    Set-Content -LiteralPath (Join-Path $aliasDir "index.cjs") -Encoding utf8
+}
+Write-Host "Final package contains real Turbopack ONNX alias wrappers: $($onnxAliases -join ', ')"
 $runtimeNextPackage = Join-Path $runtimeDir "node_modules/next/package.json"
 if (-not (Test-Path $finalExe)) { throw "KtavYad.exe was not produced in the final application folder." }
 if (-not (Test-Path $runtimeServer)) { throw "The server runtime folder was not copied into resources/runtime." }
