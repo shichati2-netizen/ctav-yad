@@ -134,6 +134,8 @@ jobs:
               "KtavYad/Application/resources/runtime/node_modules/next/package.json"
               "KtavYad/Application/resources/runtime/node_modules/next/dist/server/next.js"
               "KtavYad/Application/resources/runtime/node_modules/@swc/helpers/package.json"
+              "KtavYad/Application/resources/runtime/node_modules/@swc/helpers/esm/_interop_require_default.js"
+              "KtavYad/Application/resources/runtime/node_modules/@swc/helpers/esm/_interop_require_wildcard.js"
             )
             foreach ($requiredEntry in $requiredEntries) {
               if (-not ($entries -contains $requiredEntry)) {
@@ -164,7 +166,7 @@ jobs:
             $checkArchive.Dispose()
           }
           $env:CTAV_ZIP_CHECK_NODE_MODULES = $checkNodeModules
-          node -e "const path=require('path'),root=process.env.CTAV_ZIP_CHECK_NODE_MODULES,pkg=require(path.join(root,'next','package.json')),resolved=require.resolve('next',{paths:[root]});if(!pkg.main)throw new Error('Next.js package.json has no main entry');if(path.resolve(path.dirname(path.join(root,'next','package.json')),pkg.main)!==path.resolve(resolved))throw new Error('Next.js main path mismatch');require(resolved);const swc=require.resolve('@swc/helpers/_/_interop_require_default',{paths:[root]});require(swc);console.log('Full ZIP runtime dependency test passed:',resolved,'; SWC:',swc)"
+          node -e "const path=require('path'),root=process.env.CTAV_ZIP_CHECK_NODE_MODULES,pkg=require(path.join(root,'next','package.json')),resolved=require.resolve('next',{paths:[root]});if(!pkg.main)throw new Error('Next.js package.json has no main entry');if(path.resolve(path.dirname(path.join(root,'next','package.json')),pkg.main)!==path.resolve(resolved))throw new Error('Next.js main path mismatch');require(resolved);const swc=require.resolve('@swc/helpers/_/_interop_require_default',{paths:[root]});const d=require('@swc/helpers/_/_interop_require_default');const w=require('@swc/helpers/_/_interop_require_wildcard');require(swc);console.log('Full ZIP runtime dependencies passed:',resolved,'; SWC:',swc,'; helper exports:',typeof d._,typeof w._)"
           if ($LASTEXITCODE -ne 0) { throw "Next.js or one of its runtime dependencies cannot be loaded from the extracted ZIP contents." }
           $modelInAppZip = @($entries | Where-Object { $_.EndsWith("backbone.fp16.onnx",[System.StringComparison]::OrdinalIgnoreCase) })
           if ($modelInAppZip.Count -gt 0) { throw "The large ONNX model must be a separate Release asset, not inside the application ZIP." }
