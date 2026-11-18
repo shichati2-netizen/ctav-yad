@@ -35,7 +35,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
           $modelPath = Join-Path $modelDir "backbone.fp16.onnx"
           $modelUrl = "https://huggingface.co/itayinbar/Mishkefet-v1/resolve/main/onnx/backbone.fp16.onnx"
-          Write-Host "Downloading ONNX model from the official Mishkefet model repository..."
+          Write-Host "Downloading ONNX model for the separate Release asset..."
           Invoke-WebRequest -Uri $modelUrl -OutFile $modelPath
           $model = Get-Item $modelPath
           if ($model.Length -lt 50MB) {
@@ -43,108 +43,63 @@ jobs:
           }
           Write-Host "ONNX model downloaded: $([math]::Round($model.Length / 1MB, 1)) MB"
           $licenseSource = Join-Path $env:GITHUB_WORKSPACE "models/mishkefet/LICENSE.txt"
+          $licenseTarget = Join-Path $modelDir "LICENSE-Mishkefet.txt"
           if (Test-Path $licenseSource) {
-            Copy-Item -LiteralPath $licenseSource -Destination (Join-Path $modelDir "LICENSE-Mishkefet.txt") -Force
+            Copy-Item -LiteralPath $licenseSource -Destination $licenseTarget -Force
           } else {
             @(
               "Mishkefet-v1 ONNX model"
               "Source: https://huggingface.co/itayinbar/Mishkefet-v1"
               "License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)."
               "The model weights and derivatives may not be used commercially. See the model repository for full terms and attribution."
-            ) | Set-Content -Path (Join-Path $modelDir "LICENSE-Mishkefet.txt") -Encoding utf8
+            ) | Set-Content -Path $licenseTarget -Encoding utf8
           }
 
-      - name: Create ZIP for GitHub Release
+      - name: Create and verify application ZIP
         shell: pwsh
         run: |
           $packageDir = Join-Path $env:GITHUB_WORKSPACE "dist/KtavYad"
-          if (-not (Test-Path (Join-Path $packageDir "Application/KtavYad.exe"))) {
-            throw "Application executable was not found in the generated package."
-          }
-          if (-not (Test-Path (Join-Path $packageDir "README-Model.txt"))) {
-            throw "Model installation instructions are missing."
-          }
+          $exePath = Join-Path $packageDir "Application/KtavYad.exe"
+          $readmePath = Join-Path $packageDir "README-Model.txt"
+          if (-not (Test-Path $exePath)) { throw "Application executable is missing: $exePath" }
+          if (-not (Test-Path $readmePath)) { throw "Model installation instructions are missing." }
+
           $zipPath = Join-Path $env:GITHUB_WORKSPACE "dist/KtavYad-Windows.zip"
           if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-
-          # Compress-Archive can fail while traversing some Next.js standalone
-          # reparse-point/package paths. Windows runners include tar.exe (bsdtar),
-          # which writes ZIP archives and preserves symlink entries without walking
-          # a missing link target as if it were a normal directory.
           $tar = (Get-Command tar.exe -ErrorAction Stop).Source
           $distDir = Join-Path $env:GITHUB_WORKSPACE "dist"
           Push-Location $distDir
           try {
             & $tar -a -c -f $zipPath "KtavYad"
-            if ($LASTEXITCODE -ne 0) {
-              throw "tar.exe failed to create the Windows release ZIP (exit code $LASTEXITCODE)."
-            }
-            $entries = @(& $tar -t -f $zipPath)
-            if ($LASTEXITCODE -ne 0) {
-              throw "The generated Windows release ZIP could not be listed."
-            }
+            if ($LASTEXITCODE -ne 0) { throw "tar.exe ZIP creation failed with exit code $LASTEXITCODE." }
+            $entries = @(& $tar -tf $zipPath)
+            if ($LASTEXITCODE -ne 0) { throw "The created ZIP could not be listed or read." }
           } finally {
             Pop-Location
           }
 
-          foreach ($requiredEntry in @(
-            "KtavYad/README-Model.txt",
-            "KtavYad/Application/KtavYad.exe",
-            "KtavYad/Application/resources/runtime/server.js",
+          $requiredEntries = @(
+            "KtavYad/README-Model.txt"
+            "KtavYad/Application/KtavYad.exe"
+            "KtavYad/Application/resources/runtime/server.js"
             "KtavYad/Application/resources/runtime/node_modules/next/package.json"
-          )) {
+          )
+          foreach ($requiredEntry in $requiredEntries) {
             if (-not ($entries -contains $requiredEntry)) {
               throw "Release ZIP is missing required entry: $requiredEntry"
             }
           }
-          if ($entries | Where-Object { $_ -match '(^|/)backbone\.fp16\.onnx
-
-      - name: Upload release package as workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: KtavYad-Windows-Release-ZIP
-          path: dist/KtavYad-Windows.zip
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: KtavYad v1.0.${{ github.run_number }}
-          target_commitish: ${{ github.sha }}
-          draft: false
-          prerelease: false
-          make_latest: true
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            dist/KtavYad-Windows.zip
-            dist/model-asset/backbone.fp16.onnx
-            dist/model-asset/LICENSE-Mishkefet.txt
-          body: |
-            חבילת Windows מלאה של KtavYad.
-
-            **התקנה והפעלה**
-            1. הורידו וחלצו את KtavYad-Windows.zip.
-            2. הפעילו את KtavYad/Application/KtavYad.exe.
-            3. להפעלת זיהוי כתב יד, העתיקו את backbone.fp16.onnx מהגרסה הקודמת לנתיב KtavYad/Application/models/mishkefet/ (או ישירות לצד קובץ ה-EXE).
-
-            קובץ המודל הגדול מצורף בנפרד ל-Release בשם backbone.fp16.onnx, ואינו נכלל ב-ZIP. קובצי העזר הקטנים כלולים בחבילה.
-            רישיון המודל: CC BY-NC-SA 4.0; השימוש המסחרי אסור. קובץ הרישיון והייחוס מצורף בנפרד.
- }) {
-            throw "The large ONNX model must remain a separate Release asset, not inside the application ZIP."
+          $modelInAppZip = @($entries | Where-Object { $_.EndsWith("backbone.fp16.onnx", [System.StringComparison]::OrdinalIgnoreCase) })
+          if ($modelInAppZip.Count -gt 0) {
+            throw "The large ONNX model must be a separate Release asset, not inside the application ZIP."
           }
-
           $zip = Get-Item $zipPath
-          if ($zip.Length -lt 100MB) {
-            throw "The generated Windows release ZIP is unexpectedly small ($($zip.Length) bytes)."
-          }
-          Write-Host "Release ZIP created and verified: $($zip.FullName)"
-          Write-Host "Verified entries: $($entries.Count)"
-          Write-Host "Release ZIP size: $([math]::Round($zip.Length / 1MB, 1)) MB"
+          if ($zip.Length -lt 100MB) { throw "The generated application ZIP is unexpectedly small ($($zip.Length) bytes)." }
+          Write-Host "Application ZIP verified: $($zip.FullName)"
+          Write-Host "Verified ZIP entries: $($entries.Count)"
+          Write-Host "Application ZIP size: $([math]::Round($zip.Length / 1MB, 1)) MB"
 
-      - name: Upload release package as workflow artifact
+      - name: Upload Release ZIP as workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: KtavYad-Windows-Release-ZIP
@@ -173,7 +128,7 @@ jobs:
             **התקנה והפעלה**
             1. הורידו וחלצו את KtavYad-Windows.zip.
             2. הפעילו את KtavYad/Application/KtavYad.exe.
-            3. להפעלת זיהוי כתב יד, העתיקו את backbone.fp16.onnx מהגרסה הקודמת לנתיב KtavYad/Application/models/mishkefet/ (או ישירות לצד קובץ ה-EXE).
+            3. להפעלת זיהוי כתב יד, העתיקו את backbone.fp16.onnx לתיקיית KtavYad/Application/models/mishkefet/.
 
-            קובץ המודל הגדול מצורף בנפרד ל-Release בשם backbone.fp16.onnx, ואינו נכלל ב-ZIP. קובצי העזר הקטנים כלולים בחבילה.
-            רישיון המודל: CC BY-NC-SA 4.0; השימוש המסחרי אסור. קובץ הרישיון והייחוס מצורף בנפרד.
+            קובץ המודל הגדול מצורף בנפרד ל-Release בשם backbone.fp16.onnx ואינו נכלל ב-ZIP. קובצי העזר הקטנים כלולים בחבילה.
+            רישיון המודל: CC BY-NC-SA 4.0; שימוש מסחרי אסור. קובץ הרישיון מצורף בנפרד.
