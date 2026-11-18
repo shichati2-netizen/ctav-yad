@@ -1,0 +1,81 @@
+name: Verify published KtavYad Release on Windows
+
+on:
+  workflow_run:
+    workflows:
+      - Build and publish KtavYad Windows Release
+    types: [completed]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-published-windows-release:
+    if: github.event_name == 'release' || github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout current Windows smoke-test harness
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Download the exact published Release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || format('v1.0.{0}', github.event.workflow_run.run_number) }}
+        run: |
+          $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
+          $modelDir = Join-Path $dist "model-asset"
+          New-Item -ItemType Directory -Force -Path $dist,$modelDir | Out-Null
+
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern "KtavYad-Windows.zip" --dir $dist
+          if ($LASTEXITCODE -ne 0) { throw "Could not download the published KtavYad Windows ZIP for $env:RELEASE_TAG." }
+
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern "backbone.fp16.onnx" --pattern "LICENSE-Mishkefet.txt" --dir $modelDir
+          if ($LASTEXITCODE -ne 0) { throw "Could not download the published ONNX model and license for $env:RELEASE_TAG." }
+
+          $zip = Join-Path $dist "KtavYad-Windows.zip"
+          $model = Join-Path $modelDir "backbone.fp16.onnx"
+          if ((Get-Item -LiteralPath $zip).Length -lt 100MB) { throw "Published Windows ZIP is unexpectedly small." }
+          if ((Get-Item -LiteralPath $model).Length -lt 50MB) { throw "Published ONNX model is unexpectedly small." }
+
+          Add-Type -AssemblyName System.IO.Compression
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $badModel = @($archive.Entries | Where-Object { $_.FullName.EndsWith("backbone.fp16.onnx",[System.StringComparison]::OrdinalIgnoreCase) })
+            if ($badModel.Count -gt 0) { throw "The large ONNX model must remain a separate Release asset, not inside the Windows ZIP." }
+            $required = @(
+              "KtavYad/Application/KtavYad.exe"
+              "KtavYad/Application/resources/runtime/server.js"
+              "KtavYad/Application/resources/runtime/node_modules/next/package.json"
+              "KtavYad/Application/resources/runtime/node_modules/@swc/helpers/package.json"
+            )
+            $names = @($archive.Entries | ForEach-Object { $_.FullName })
+            foreach ($entry in $required) {
+              if (-not ($names -contains $entry)) { throw "Published Windows ZIP is missing required entry: $entry" }
+            }
+            Write-Host "Published ZIP contains $($names.Count) entries and all required runtime files."
+          } finally {
+            $archive.Dispose()
+          }
+
+          Expand-Archive -LiteralPath $zip -DestinationPath $dist -Force
+          Write-Host "Downloaded published Release $env:RELEASE_TAG and extracted its actual ZIP."
+
+      - name: Run published EXE with the published ONNX model
+        shell: pwsh
+        timeout-minutes: 12
+        run: ./scripts/test-portable-exe.ps1
+
+      - name: Upload published EXE diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: KtavYad-Published-EXE-Diagnostics
+          path: ${{ runner.temp }}/ktavyad-electron-smoke/KtavYad-Data/logs/server.log
+          if-no-files-found: warn
+          retention-days: 30
