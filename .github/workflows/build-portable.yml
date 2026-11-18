@@ -46,12 +46,12 @@ jobs:
           if (Test-Path $licenseSource) {
             Copy-Item -LiteralPath $licenseSource -Destination (Join-Path $modelDir "LICENSE-Mishkefet.txt") -Force
           } else {
-            @"
-Mishkefet-v1 ONNX model
-Source: https://huggingface.co/itayinbar/Mishkefet-v1
-License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0).
-The model weights and derivatives may not be used commercially. See the model repository for full terms and attribution.
-"@ | Set-Content -Path (Join-Path $modelDir "LICENSE-Mishkefet.txt") -Encoding utf8
+            @(
+              "Mishkefet-v1 ONNX model"
+              "Source: https://huggingface.co/itayinbar/Mishkefet-v1"
+              "License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)."
+              "The model weights and derivatives may not be used commercially. See the model repository for full terms and attribution."
+            ) | Set-Content -Path (Join-Path $modelDir "LICENSE-Mishkefet.txt") -Encoding utf8
           }
 
       - name: Create ZIP for GitHub Release
