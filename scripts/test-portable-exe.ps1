@@ -99,7 +99,7 @@ try {
 
   $scripts = @()
   foreach ($match in [regex]::Matches($home.Content, 'src=([^ >]+\.js[^ >]*)')) {
-    $src = $match.Groups[1].Value.Trim('"', "'")
+    $src = $match.Groups[1].Value.Trim([char]34).Trim([char]39)
     if ($src -and -not ($scripts -contains $src)) { $scripts += $src }
   }
   if ($scripts.Count -lt 1) {
