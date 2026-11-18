@@ -485,6 +485,27 @@ Invoke-Checked "npm" @("run", "build") "Next.js production build failed."
 $standalone = Join-Path $source ".next/standalone"
 if (-not (Test-Path (Join-Path $standalone "server.js"))) { throw "Next.js standalone server was not produced." }
 
+# Next.js standalone tracing can omit the Next.js package itself in this generated
+# desktop bundle. Ensure the runtime has Next.js at the exact location server.js resolves.
+$standaloneNodeModules = Join-Path $standalone "node_modules"
+New-Item -ItemType Directory -Force -Path $standaloneNodeModules | Out-Null
+$sourceNextPackage = Join-Path $source "node_modules/next"
+$standaloneNextPackage = Join-Path $standaloneNodeModules "next"
+if (-not (Test-Path (Join-Path $sourceNextPackage "package.json"))) {
+  throw "The installed Next.js package is missing from source node_modules."
+}
+if (Test-Path $standaloneNextPackage) {
+  Remove-Item -LiteralPath $standaloneNextPackage -Recurse -Force
+}
+Copy-Item -LiteralPath $sourceNextPackage -Destination $standaloneNextPackage -Recurse -Force
+Push-Location $standalone
+try {
+  node -e "const p=require.resolve('next/package.json');console.log('Packaged Next.js resolved from: '+p);"
+  if ($LASTEXITCODE -ne 0) { throw "The packaged Next.js dependency cannot be resolved from the standalone runtime." }
+} finally {
+  Pop-Location
+}
+
 # Copy assets that Next.js standalone intentionally leaves outside the traced server bundle.
 New-Item -ItemType Directory -Force -Path (Join-Path $standalone "public") | Out-Null
 Copy-Item -Path (Join-Path $source "public/*") -Destination (Join-Path $standalone "public") -Recurse -Force
