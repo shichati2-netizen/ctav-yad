@@ -28,6 +28,32 @@ jobs:
         shell: pwsh
         run: ./scripts/build-portable.ps1
 
+      - name: Download ONNX model for separate Release asset
+        shell: pwsh
+        run: |
+          $modelDir = Join-Path $env:GITHUB_WORKSPACE "dist/model-asset"
+          New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
+          $modelPath = Join-Path $modelDir "backbone.fp16.onnx"
+          $modelUrl = "https://huggingface.co/itayinbar/Mishkefet-v1/resolve/main/onnx/backbone.fp16.onnx"
+          Write-Host "Downloading ONNX model from the official Mishkefet model repository..."
+          Invoke-WebRequest -Uri $modelUrl -OutFile $modelPath
+          $model = Get-Item $modelPath
+          if ($model.Length -lt 50MB) {
+            throw "The downloaded ONNX model is unexpectedly small ($($model.Length) bytes)."
+          }
+          Write-Host "ONNX model downloaded: $([math]::Round($model.Length / 1MB, 1)) MB"
+          $licenseSource = Join-Path $env:GITHUB_WORKSPACE "models/mishkefet/LICENSE.txt"
+          if (Test-Path $licenseSource) {
+            Copy-Item -LiteralPath $licenseSource -Destination (Join-Path $modelDir "LICENSE-Mishkefet.txt") -Force
+          } else {
+            @"
+Mishkefet-v1 ONNX model
+Source: https://huggingface.co/itayinbar/Mishkefet-v1
+License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0).
+The model weights and derivatives may not be used commercially. See the model repository for full terms and attribution.
+"@ | Set-Content -Path (Join-Path $modelDir "LICENSE-Mishkefet.txt") -Encoding utf8
+          }
+
       - name: Create ZIP for GitHub Release
         shell: pwsh
         run: |
@@ -64,7 +90,10 @@ jobs:
           make_latest: true
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: dist/KtavYad-Windows.zip
+          files: |
+            dist/KtavYad-Windows.zip
+            dist/model-asset/backbone.fp16.onnx
+            dist/model-asset/LICENSE-Mishkefet.txt
           body: |
             חבילת Windows מלאה של KtavYad.
 
@@ -73,4 +102,5 @@ jobs:
             2. הפעילו את KtavYad/Application/KtavYad.exe.
             3. להפעלת זיהוי כתב יד, העתיקו את backbone.fp16.onnx מהגרסה הקודמת לנתיב KtavYad/Application/models/mishkefet/ (או ישירות לצד קובץ ה-EXE).
 
-            קובץ המודל הגדול אינו נכלל ב-ZIP. קובצי העזר הקטנים כלולים בחבילה.
+            קובץ המודל הגדול מצורף בנפרד ל-Release בשם backbone.fp16.onnx, ואינו נכלל ב-ZIP. קובצי העזר הקטנים כלולים בחבילה.
+            רישיון המודל: CC BY-NC-SA 4.0; השימוש המסחרי אסור. קובץ הרישיון והייחוס מצורף בנפרד.
