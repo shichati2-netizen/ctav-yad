@@ -247,9 +247,9 @@ $buildConfig = @{
   files = @("electron-main.cjs", "package.json")
   extraResources = @(
     @{ from = ".next/standalone"; to = "runtime" },
-    # Copy Next.js directly as a separate resource as an extra safeguard:
-    # Electron Builder's standalone directory filter omitted this package in the final app.
-    @{ from = "node_modules/next"; to = "runtime/node_modules/next" }
+    # Explicitly restore Next and SWC ESM files in the final Electron resources.
+    @{ from = "node_modules/next"; to = "runtime/node_modules/next" },
+    @{ from = ".next/standalone/node_modules/@swc/helpers/esm"; to = "runtime/node_modules/@swc/helpers/esm" }
   )
   win = @{
     signAndEditExecutable = $false
@@ -560,9 +560,37 @@ Invoke-Checked "npm" @(
   "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund",
   "next@$($nextPackageInfo.version)"
 ) "Installing Next.js runtime dependencies into the standalone package failed."
+
+# Next 16.3+ with @swc/helpers 0.5.17+ adds the Node 22.12+ "module-sync"
+# export condition. Node 22/24 resolves the ESM helpers, but Next's standalone
+# file tracer may copy only CJS helpers. Explicitly restore the complete ESM tree.
+$sourceSwcPackage = Join-Path $source "node_modules/@swc/helpers"
+$standaloneSwcPackage = Join-Path $standaloneNodeModules "@swc/helpers"
+$sourceSwcEsm = Join-Path $sourceSwcPackage "esm"
+$standaloneSwcEsm = Join-Path $standaloneSwcPackage "esm"
+if (-not (Test-Path (Join-Path $sourceSwcPackage "package.json"))) {
+  throw "The source @swc/helpers package is missing."
+}
+if (-not (Test-Path $sourceSwcEsm)) {
+  throw "The source @swc/helpers ESM directory is missing."
+}
+$sourceSwcVersion = (Get-Content (Join-Path $sourceSwcPackage "package.json") -Raw | ConvertFrom-Json).version
+$standaloneSwcVersion = (Get-Content (Join-Path $standaloneSwcPackage "package.json") -Raw | ConvertFrom-Json).version
+if ($sourceSwcVersion -ne $standaloneSwcVersion) {
+  throw "Source and standalone @swc/helpers versions differ ($sourceSwcVersion vs $standaloneSwcVersion)."
+}
+New-Item -ItemType Directory -Force -Path $standaloneSwcPackage | Out-Null
+Copy-Item -LiteralPath $sourceSwcEsm -Destination $standaloneSwcPackage -Recurse -Force
+foreach ($helper in @("_interop_require_default.js","_interop_require_wildcard.js")) {
+  if (-not (Test-Path (Join-Path $standaloneSwcEsm $helper) -PathType Leaf)) {
+    throw "Required @swc/helpers ESM file was not copied: $helper"
+  }
+}
+Write-Host "Restored @swc/helpers $standaloneSwcVersion ESM files for Node module-sync resolution."
+
 Push-Location $standalone
 try {
-  node -e "const p=require.resolve('next/package.json');const swc=require.resolve('@swc/helpers/_/_interop_require_default');require('next');console.log('Packaged Next.js and runtime dependencies loaded:',p,'; SWC:',swc);"
+  node -e "const p=require.resolve('next/package.json');const swc=require.resolve('@swc/helpers/_/_interop_require_default');const helper=require('@swc/helpers/_/_interop_require_default');const wildcard=require('@swc/helpers/_/_interop_require_wildcard');require('next');console.log('Packaged Next.js and SWC ESM dependencies loaded:',p,'; SWC:',swc,'; helpers:',typeof helper._,typeof wildcard._);"
   if ($LASTEXITCODE -ne 0) { throw "Next.js or one of its runtime dependencies cannot be loaded from the standalone runtime." }
 } finally {
   Pop-Location
@@ -706,10 +734,16 @@ if (-not (Test-Path (Join-Path $runtimeDir ".next/static/chunks"))) {
 }
 
 # Repeat Node's module-resolution check from the exact final server directory.
+$runtimeSwcEsm = Join-Path $runtimeDir "node_modules/@swc/helpers/esm"
+foreach ($helper in @("_interop_require_default.js","_interop_require_wildcard.js")) {
+  if (-not (Test-Path (Join-Path $runtimeSwcEsm $helper) -PathType Leaf)) {
+    throw "Final Electron package is missing @swc/helpers ESM file: $helper"
+  }
+}
 Push-Location $runtimeDir
 try {
-  node -e "const p=require.resolve('next');const n=require('next/package.json').version;require('next');require('@swc/helpers/_/_interop_require_default');console.log('Final packaged Next.js and SWC dependencies loaded:',n,'resolved to',p)"
-  if ($LASTEXITCODE -ne 0) { throw "The final packaged runtime cannot resolve the Next.js framework package." }
+  node -e "const p=require.resolve('next');const n=require('next/package.json').version;const d=require('@swc/helpers/_/_interop_require_default');const w=require('@swc/helpers/_/_interop_require_wildcard');require('next');console.log('Final packaged Next.js and SWC module-sync helpers loaded:',n,'resolved to',p,'; helper exports:',typeof d._,typeof w._)"
+  if ($LASTEXITCODE -ne 0) { throw "The final packaged runtime cannot load Next.js or its @swc/helpers ESM dependencies." }
 } finally {
   Pop-Location
 }
