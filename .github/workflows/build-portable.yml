@@ -66,9 +66,82 @@ jobs:
           }
           $zipPath = Join-Path $env:GITHUB_WORKSPACE "dist/KtavYad-Windows.zip"
           if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-          Compress-Archive -Path $packageDir -DestinationPath $zipPath -CompressionLevel Optimal
+
+          # Compress-Archive can fail while traversing some Next.js standalone
+          # reparse-point/package paths. Windows runners include tar.exe (bsdtar),
+          # which writes ZIP archives and preserves symlink entries without walking
+          # a missing link target as if it were a normal directory.
+          $tar = (Get-Command tar.exe -ErrorAction Stop).Source
+          $distDir = Join-Path $env:GITHUB_WORKSPACE "dist"
+          Push-Location $distDir
+          try {
+            & $tar -a -c -f $zipPath "KtavYad"
+            if ($LASTEXITCODE -ne 0) {
+              throw "tar.exe failed to create the Windows release ZIP (exit code $LASTEXITCODE)."
+            }
+            $entries = @(& $tar -t -f $zipPath)
+            if ($LASTEXITCODE -ne 0) {
+              throw "The generated Windows release ZIP could not be listed."
+            }
+          } finally {
+            Pop-Location
+          }
+
+          foreach ($requiredEntry in @(
+            "KtavYad/README-Model.txt",
+            "KtavYad/Application/KtavYad.exe",
+            "KtavYad/Application/resources/runtime/server.js",
+            "KtavYad/Application/resources/runtime/node_modules/next/package.json"
+          )) {
+            if (-not ($entries -contains $requiredEntry)) {
+              throw "Release ZIP is missing required entry: $requiredEntry"
+            }
+          }
+          if ($entries | Where-Object { $_ -match '(^|/)backbone\.fp16\.onnx
+
+      - name: Upload release package as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KtavYad-Windows-Release-ZIP
+          path: dist/KtavYad-Windows.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: KtavYad v1.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/KtavYad-Windows.zip
+            dist/model-asset/backbone.fp16.onnx
+            dist/model-asset/LICENSE-Mishkefet.txt
+          body: |
+            חבילת Windows מלאה של KtavYad.
+
+            **התקנה והפעלה**
+            1. הורידו וחלצו את KtavYad-Windows.zip.
+            2. הפעילו את KtavYad/Application/KtavYad.exe.
+            3. להפעלת זיהוי כתב יד, העתיקו את backbone.fp16.onnx מהגרסה הקודמת לנתיב KtavYad/Application/models/mishkefet/ (או ישירות לצד קובץ ה-EXE).
+
+            קובץ המודל הגדול מצורף בנפרד ל-Release בשם backbone.fp16.onnx, ואינו נכלל ב-ZIP. קובצי העזר הקטנים כלולים בחבילה.
+            רישיון המודל: CC BY-NC-SA 4.0; השימוש המסחרי אסור. קובץ הרישיון והייחוס מצורף בנפרד.
+ }) {
+            throw "The large ONNX model must remain a separate Release asset, not inside the application ZIP."
+          }
+
           $zip = Get-Item $zipPath
-          Write-Host "Release ZIP created: $($zip.FullName)"
+          if ($zip.Length -lt 100MB) {
+            throw "The generated Windows release ZIP is unexpectedly small ($($zip.Length) bytes)."
+          }
+          Write-Host "Release ZIP created and verified: $($zip.FullName)"
+          Write-Host "Verified entries: $($entries.Count)"
           Write-Host "Release ZIP size: $([math]::Round($zip.Length / 1MB, 1)) MB"
 
       - name: Upload release package as workflow artifact
