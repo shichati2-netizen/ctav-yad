@@ -59,46 +59,101 @@ jobs:
         shell: pwsh
         run: |
           $packageDir = Join-Path $env:GITHUB_WORKSPACE "dist/KtavYad"
+          $runtimeDir = Join-Path $packageDir "Application/resources/runtime"
           $exePath = Join-Path $packageDir "Application/KtavYad.exe"
+          $nextPackage = Join-Path $runtimeDir "node_modules/next/package.json"
+          $nextEntry = Join-Path $runtimeDir "node_modules/next/dist/server/next.js"
           $readmePath = Join-Path $packageDir "README-Model.txt"
-          if (-not (Test-Path $exePath)) { throw "Application executable is missing: $exePath" }
-          if (-not (Test-Path $readmePath)) { throw "Model installation instructions are missing." }
+          foreach ($requiredFile in @($exePath,$nextPackage,$nextEntry,$readmePath)) {
+            if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
+              throw "Required application file is missing before ZIP creation: $requiredFile"
+            }
+          }
+          if ((Get-Item -LiteralPath $nextEntry).Length -lt 100KB) {
+            throw "Next.js server entry file is unexpectedly small or incomplete."
+          }
 
           $zipPath = Join-Path $env:GITHUB_WORKSPACE "dist/KtavYad-Windows.zip"
           if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-          $tar = (Get-Command tar.exe -ErrorAction Stop).Source
-          $distDir = Join-Path $env:GITHUB_WORKSPACE "dist"
-          Push-Location $distDir
-          try {
-            & $tar -a -c -f $zipPath "KtavYad"
-            if ($LASTEXITCODE -ne 0) { throw "tar.exe ZIP creation failed with exit code $LASTEXITCODE." }
-            $entries = @(& $tar -tf $zipPath)
-            if ($LASTEXITCODE -ne 0) { throw "The created ZIP could not be listed or read." }
-          } finally {
-            Pop-Location
-          }
-
-          $requiredEntries = @(
-            "KtavYad/README-Model.txt"
-            "KtavYad/Application/KtavYad.exe"
-            "KtavYad/Application/resources/runtime/server.js"
-            "KtavYad/Application/resources/runtime/node_modules/next/package.json"
-          )
-          foreach ($requiredEntry in $requiredEntries) {
-            if (-not ($entries -contains $requiredEntry)) {
-              throw "Release ZIP is missing required entry: $requiredEntry"
+          Add-Type -AssemblyName System.IO.Compression
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $baseDir = (Resolve-Path -LiteralPath $packageDir).Path
+          $zipStream = [System.IO.File]::Open($zipPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+          $zipArchive = [System.IO.Compression.ZipArchive]::new($zipStream,[System.IO.Compression.ZipArchiveMode]::Create,$false)
+          $script:zipFileCount = 0
+          $script:zipSkippedLinks = 0
+          function Add-ZipDirectory([string]$Directory) {
+            foreach ($item in Get-ChildItem -LiteralPath $Directory -Force) {
+              $attributes = [System.IO.File]::GetAttributes($item.FullName)
+              if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $script:zipSkippedLinks++
+                Write-Host "Skipping reparse point: $($item.FullName)"
+                continue
+              }
+              if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+                Add-ZipDirectory $item.FullName
+                continue
+              }
+              $relative = [System.IO.Path]::GetRelativePath($baseDir,$item.FullName).Replace('\','/')
+              [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $zipArchive,$item.FullName,$relative,[System.IO.Compression.CompressionLevel]::Optimal
+              )
+              $script:zipFileCount++
             }
           }
-          $modelInAppZip = @($entries | Where-Object { $_.EndsWith("backbone.fp16.onnx", [System.StringComparison]::OrdinalIgnoreCase) })
-          if ($modelInAppZip.Count -gt 0) {
-            throw "The large ONNX model must be a separate Release asset, not inside the application ZIP."
+          try {
+            Add-ZipDirectory $baseDir
+          } finally {
+            $zipArchive.Dispose()
           }
-          $zip = Get-Item $zipPath
-          if ($zip.Length -lt 100MB) { throw "The generated application ZIP is unexpectedly small ($($zip.Length) bytes)." }
-          Write-Host "Application ZIP verified: $($zip.FullName)"
-          Write-Host "Verified ZIP entries: $($entries.Count)"
-          Write-Host "Application ZIP size: $([math]::Round($zip.Length / 1MB, 1)) MB"
+          Write-Host "ZIP files written: $script:zipFileCount; reparse points skipped: $script:zipSkippedLinks"
 
+          # Reopen the actual ZIP, require the exact Next.js runtime entry, and
+          # extract those entries to a clean folder to emulate the user's unzip.
+          $checkArchive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+          $extractCheck = Join-Path $env:RUNNER_TEMP "ktavyad-zip-check"
+          if (Test-Path $extractCheck) { Remove-Item -LiteralPath $extractCheck -Recurse -Force }
+          $checkNodeModules = Join-Path $extractCheck "node_modules"
+          $checkNextDir = Join-Path $checkNodeModules "next"
+          New-Item -ItemType Directory -Force -Path (Join-Path $checkNextDir "dist/server") | Out-Null
+          try {
+            $entries = @($checkArchive.Entries | ForEach-Object { $_.FullName })
+            $requiredEntries = @(
+              "README-Model.txt"
+              "Application/KtavYad.exe"
+              "Application/resources/runtime/server.js"
+              "Application/resources/runtime/node_modules/next/package.json"
+              "Application/resources/runtime/node_modules/next/dist/server/next.js"
+            )
+            foreach ($requiredEntry in $requiredEntries) {
+              if (-not ($entries -contains $requiredEntry)) {
+                throw "Release ZIP is missing required entry: $requiredEntry"
+              }
+            }
+            $packageEntry = $checkArchive.GetEntry("Application/resources/runtime/node_modules/next/package.json")
+            $mainEntry = $checkArchive.GetEntry("Application/resources/runtime/node_modules/next/dist/server/next.js")
+            if ($mainEntry.Length -lt 100KB) { throw "ZIP's next/dist/server/next.js entry is unexpectedly small." }
+            foreach ($sourceEntry in @($packageEntry,$mainEntry)) {
+              $relative = $sourceEntry.FullName.Substring("Application/resources/runtime/".Length).Replace('/',[System.IO.Path]::DirectorySeparatorChar)
+              $destination = Join-Path $extractCheck $relative
+              New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+              $inputStream = $sourceEntry.Open()
+              $outputStream = [System.IO.File]::Open($destination,[System.IO.FileMode]::Create,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
+              try { $inputStream.CopyTo($outputStream) } finally { $outputStream.Dispose(); $inputStream.Dispose() }
+            }
+          } finally {
+            $checkArchive.Dispose()
+          }
+          $env:CTAV_ZIP_CHECK_NODE_MODULES = $checkNodeModules
+          node -e "const p=require.resolve('next',{paths:[process.env.CTAV_ZIP_CHECK_NODE_MODULES]});if(!require('fs').existsSync(p))throw new Error('Resolved Next.js main file is missing after ZIP extraction: '+p);console.log('ZIP extraction check passed:',p)"
+          if ($LASTEXITCODE -ne 0) { throw "Next.js cannot be resolved from the extracted ZIP contents." }
+          $modelInAppZip = @($entries | Where-Object { $_.EndsWith("backbone.fp16.onnx",[System.StringComparison]::OrdinalIgnoreCase) })
+          if ($modelInAppZip.Count -gt 0) { throw "The large ONNX model must be a separate Release asset, not inside the application ZIP." }
+          $zip = Get-Item -LiteralPath $zipPath
+          if ($zip.Length -lt 100MB) { throw "The generated application ZIP is unexpectedly small ($($zip.Length) bytes)." }
+          Write-Host "Application ZIP fully verified: $($zip.FullName)"
+          Write-Host "Verified ZIP entries: $($entries.Count)"
+          Write-Host "Application ZIP size: $([math]::Round($zip.Length/1MB,1)) MB"
       - name: Upload Release ZIP as workflow artifact
         uses: actions/upload-artifact@v4
         with:
