@@ -733,24 +733,36 @@ if (-not (Test-Path (Join-Path $runtimeDir ".next/static/chunks"))) {
   throw "The Next.js static chunks folder is missing from resources/runtime."
 }
 
-# Electron Builder may omit package metadata for a transitive package even when
-# its ESM payload is copied as an extra resource. Restore the COMPLETE SWC helper
-# package after packaging, including package.json, CJS files, and ESM files.
+# Electron Builder can omit transitive runtime packages from extraResources.
+# Replace its partial runtime/node_modules with the complete, production-tested
+# standalone dependency tree produced above. This keeps every package and its
+# package.json together (Next.js, @next/env, SWC, and their transitive dependencies).
 $runtimeNodeModules = Join-Path $runtimeDir "node_modules"
-$runtimeSwcPackage = Join-Path $runtimeNodeModules "@swc/helpers"
-if (-not (Test-Path $sourceSwcPackage)) {
-  throw "The complete source @swc/helpers package is missing."
+if (-not (Test-Path $standaloneNodeModules)) {
+  throw "The tested standalone node_modules directory is missing."
 }
-New-Item -ItemType Directory -Force -Path (Split-Path $runtimeSwcPackage -Parent) | Out-Null
-if (Test-Path $runtimeSwcPackage) {
-  Remove-Item -LiteralPath $runtimeSwcPackage -Recurse -Force
+$standaloneNextEnv = Join-Path $standaloneNodeModules "@next/env/package.json"
+if (-not (Test-Path $standaloneNextEnv -PathType Leaf)) {
+  throw "The standalone production dependency tree is missing @next/env/package.json."
 }
-Copy-Item -LiteralPath $sourceSwcPackage -Destination $runtimeSwcPackage -Recurse -Force
+if (Test-Path $runtimeNodeModules) {
+  Remove-Item -LiteralPath $runtimeNodeModules -Recurse -Force
+}
+Copy-Item -LiteralPath $standaloneNodeModules -Destination $runtimeNodeModules -Recurse -Force
 
+$runtimeNextPackage = Join-Path $runtimeNodeModules "next/package.json"
+$runtimeNextEnv = Join-Path $runtimeNodeModules "@next/env/package.json"
+$runtimeSwcPackage = Join-Path $runtimeNodeModules "@swc/helpers"
 $runtimeSwcPackageJson = Join-Path $runtimeSwcPackage "package.json"
 $runtimeSwcEsm = Join-Path $runtimeSwcPackage "esm"
+if (-not (Test-Path $runtimeNextPackage -PathType Leaf)) {
+  throw "Final Electron runtime is missing next/package.json after restoring standalone dependencies."
+}
+if (-not (Test-Path $runtimeNextEnv -PathType Leaf)) {
+  throw "Final Electron runtime is missing @next/env/package.json after restoring standalone dependencies."
+}
 if (-not (Test-Path $runtimeSwcPackageJson -PathType Leaf)) {
-  throw "Final Electron package is missing @swc/helpers/package.json."
+  throw "Final Electron runtime is missing @swc/helpers/package.json."
 }
 $runtimeSwcVersion = (Get-Content $runtimeSwcPackageJson -Raw | ConvertFrom-Json).version
 if ($runtimeSwcVersion -ne $standaloneSwcVersion) {
@@ -758,14 +770,14 @@ if ($runtimeSwcVersion -ne $standaloneSwcVersion) {
 }
 foreach ($helper in @("_interop_require_default.js","_interop_require_wildcard.js")) {
   if (-not (Test-Path (Join-Path $runtimeSwcEsm $helper) -PathType Leaf)) {
-    throw "Final Electron package is missing @swc/helpers ESM file: $helper"
+    throw "Final Electron runtime is missing @swc/helpers ESM file: $helper"
   }
 }
-Write-Host "Restored complete @swc/helpers $runtimeSwcVersion package into the final Electron runtime."
+Write-Host "Restored complete standalone production dependency tree; Next.js, @next/env and @swc/helpers $runtimeSwcVersion are present."
 Push-Location $runtimeDir
 try {
-  node -e "const p=require.resolve('next');const n=require('next/package.json').version;const d=require('@swc/helpers/_/_interop_require_default');const w=require('@swc/helpers/_/_interop_require_wildcard');require('next');console.log('Final packaged Next.js and SWC module-sync helpers loaded:',n,'resolved to',p,'; helper exports:',typeof d._,typeof w._)"
-  if ($LASTEXITCODE -ne 0) { throw "The final packaged runtime cannot load Next.js or its @swc/helpers ESM dependencies." }
+  node -e "const p=require.resolve('next');const n=require('next/package.json').version;const e=require.resolve('@next/env');const d=require('@swc/helpers/_/_interop_require_default');const w=require('@swc/helpers/_/_interop_require_wildcard');require('next');console.log('Final packaged runtime dependency tree loaded:',n,'resolved to',p,'; @next/env:',e,'; helper exports:',typeof d._,typeof w._)"
+  if ($LASTEXITCODE -ne 0) { throw "The final packaged runtime cannot load Next.js or its production dependencies." }
 } finally {
   Pop-Location
 }
