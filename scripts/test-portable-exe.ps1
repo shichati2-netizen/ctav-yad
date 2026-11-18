@@ -88,17 +88,17 @@ try {
   if ($health.StatusCode -ne 200) { throw "Packaged EXE health endpoint did not return HTTP 200." }
   Write-Host "Packaged EXE health endpoint passed."
 
-  $home = Invoke-WebRequest -Uri "$baseUrl/" -TimeoutSec 30
-  if ($home.StatusCode -ne 200 -or $home.Content.Length -lt 1000) {
+  $homeResponse = Invoke-WebRequest -Uri "$baseUrl/" -TimeoutSec 30
+  if ($homeResponse.StatusCode -ne 200 -or $homeResponse.Content.Length -lt 1000) {
     throw "Packaged EXE homepage response is empty or unhealthy."
   }
-  if ($home.Content -notmatch "כתב יד") {
+  if ($homeResponse.Content -notmatch "כתב יד") {
     throw "Packaged EXE homepage did not return the expected Hebrew application UI."
   }
   Write-Host "Packaged EXE homepage returned the Hebrew application UI."
 
   $scripts = @()
-  foreach ($match in [regex]::Matches($home.Content, 'src=([^ >]+\.js[^ >]*)')) {
+  foreach ($match in [regex]::Matches($homeResponse.Content, 'src=([^ >]+\.js[^ >]*)')) {
     $src = $match.Groups[1].Value.Trim([char]34).Trim([char]39)
     if ($src -and -not ($scripts -contains $src)) { $scripts += $src }
   }
