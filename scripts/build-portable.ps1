@@ -733,13 +733,35 @@ if (-not (Test-Path (Join-Path $runtimeDir ".next/static/chunks"))) {
   throw "The Next.js static chunks folder is missing from resources/runtime."
 }
 
-# Repeat Node's module-resolution check from the exact final server directory.
-$runtimeSwcEsm = Join-Path $runtimeDir "node_modules/@swc/helpers/esm"
+# Electron Builder may omit package metadata for a transitive package even when
+# its ESM payload is copied as an extra resource. Restore the COMPLETE SWC helper
+# package after packaging, including package.json, CJS files, and ESM files.
+$runtimeNodeModules = Join-Path $runtimeDir "node_modules"
+$runtimeSwcPackage = Join-Path $runtimeNodeModules "@swc/helpers"
+if (-not (Test-Path $sourceSwcPackage)) {
+  throw "The complete source @swc/helpers package is missing."
+}
+New-Item -ItemType Directory -Force -Path (Split-Path $runtimeSwcPackage -Parent) | Out-Null
+if (Test-Path $runtimeSwcPackage) {
+  Remove-Item -LiteralPath $runtimeSwcPackage -Recurse -Force
+}
+Copy-Item -LiteralPath $sourceSwcPackage -Destination $runtimeSwcPackage -Recurse -Force
+
+$runtimeSwcPackageJson = Join-Path $runtimeSwcPackage "package.json"
+$runtimeSwcEsm = Join-Path $runtimeSwcPackage "esm"
+if (-not (Test-Path $runtimeSwcPackageJson -PathType Leaf)) {
+  throw "Final Electron package is missing @swc/helpers/package.json."
+}
+$runtimeSwcVersion = (Get-Content $runtimeSwcPackageJson -Raw | ConvertFrom-Json).version
+if ($runtimeSwcVersion -ne $standaloneSwcVersion) {
+  throw "Final @swc/helpers version differs from the tested standalone package ($runtimeSwcVersion vs $standaloneSwcVersion)."
+}
 foreach ($helper in @("_interop_require_default.js","_interop_require_wildcard.js")) {
   if (-not (Test-Path (Join-Path $runtimeSwcEsm $helper) -PathType Leaf)) {
     throw "Final Electron package is missing @swc/helpers ESM file: $helper"
   }
 }
+Write-Host "Restored complete @swc/helpers $runtimeSwcVersion package into the final Electron runtime."
 Push-Location $runtimeDir
 try {
   node -e "const p=require.resolve('next');const n=require('next/package.json').version;const d=require('@swc/helpers/_/_interop_require_default');const w=require('@swc/helpers/_/_interop_require_wildcard');require('next');console.log('Final packaged Next.js and SWC module-sync helpers loaded:',n,'resolved to',p,'; helper exports:',typeof d._,typeof w._)"
