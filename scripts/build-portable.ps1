@@ -112,24 +112,52 @@ $readyRouteDir = Join-Path $source "src/app/api/mishkefet/ready"
 New-Item -ItemType Directory -Force -Path $readyRouteDir | Out-Null
 @'
 import fs from "node:fs";
-import { getCore, ONNX_MODEL_PATH } from "@/lib/mishkefet/engine";
+import path from "node:path";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+function getModelPath() {
+  return process.env.MISHKEFET_ONNX_PATH
+    ? path.resolve(process.env.MISHKEFET_ONNX_PATH)
+    : path.join(process.cwd(), "models", "mishkefet", "backbone.fp16.onnx");
+}
 
 export async function GET() {
-  return Response.json({
-    exists: fs.existsSync(ONNX_MODEL_PATH),
-    modelPath: ONNX_MODEL_PATH,
-  });
+  const modelPath = getModelPath();
+  let exists = false;
+  try {
+    exists = fs.statSync(modelPath).isFile() && fs.statSync(modelPath).size >= 50 * 1024 * 1024;
+  } catch {
+    exists = false;
+  }
+  return Response.json(
+    { exists, modelPath },
+    { headers: { "Cache-Control": "no-store, max-age=0" } },
+  );
 }
 
 export async function POST() {
+  const modelPath = getModelPath();
   try {
+    if (!fs.existsSync(modelPath)) {
+      return Response.json(
+        { ready: false, error: "קובץ מודל הזיהוי חסר.", modelPath },
+        { status: 409, headers: { "Cache-Control": "no-store, max-age=0" } },
+      );
+    }
+    const { getCore } = await import("@/lib/mishkefet/engine");
     await getCore();
-    return Response.json({ ready: true });
+    return Response.json(
+      { ready: true, modelPath },
+      { headers: { "Cache-Control": "no-store, max-age=0" } },
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return Response.json({ ready: false, error: message }, { status: 503 });
+    return Response.json(
+      { ready: false, error: message, modelPath },
+      { status: 503, headers: { "Cache-Control": "no-store, max-age=0" } },
+    );
   }
 }
 '@ | Set-Content -Path (Join-Path $readyRouteDir "route.ts") -Encoding utf8
@@ -293,6 +321,12 @@ async function ensureModelFile(exeDir, dataRoot) {
   const preferred = path.join(exeDir, "models", "mishkefet", "backbone.fp16.onnx");
   const dataFallback = path.join(dataRoot, "models", "mishkefet", "backbone.fp16.onnx");
   const minimumBytes = 50 * 1024 * 1024;
+  const candidates = [
+    preferred,
+    path.join(exeDir, "backbone.fp16.onnx"),
+    path.join(path.dirname(exeDir), "backbone.fp16.onnx"),
+    dataFallback
+  ];
 
   const isUsable = (file) => {
     try {
@@ -301,44 +335,133 @@ async function ensureModelFile(exeDir, dataRoot) {
     } catch { return false; }
   };
 
-  if (isUsable(preferred)) return preferred;
-  if (isUsable(dataFallback)) return dataFallback;
-
-  setStatus("בפעם הראשונה יש לבחור את קובץ מודל הזיהוי (ONNX)...");
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "בחירת מודל הזיהוי של כתב יד",
-    buttonLabel: "בחר קובץ מודל",
-    properties: ["openFile"],
-    filters: [{ name: "Mishkefet ONNX model", extensions: ["onnx"] }]
-  });
-  if (result.canceled || !result.filePaths || !result.filePaths[0]) return null;
-
-  const selected = path.resolve(result.filePaths[0]);
-  if (path.extname(selected).toLowerCase() !== ".onnx") {
-    throw new Error("יש לבחור קובץ עם סיומת .onnx.");
-  }
-  const sourceStat = fs.statSync(selected);
-  if (!sourceStat.isFile() || sourceStat.size < minimumBytes) {
-    throw new Error("הקובץ שנבחר קטן מדי או אינו קובץ מודל ONNX תקין.");
+  for (const candidate of candidates) {
+    if (isUsable(candidate)) {
+      setStatus("נמצא קובץ מודל הזיהוי: " + candidate);
+      return candidate;
+    }
   }
 
-  let destination = preferred;
-  try {
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    if (selected !== path.resolve(destination)) await fs.promises.copyFile(selected, destination);
-  } catch (error) {
-    // Protected installation paths may be read-only: use the per-user folder.
-    destination = dataFallback;
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    if (selected !== path.resolve(destination)) await fs.promises.copyFile(selected, destination);
+  // This marker is used only by the Windows CI test to verify that the picker
+  // is actually invoked when no model exists at any supported location.
+  const pickerMarker = process.env.CTAV_SMOKE_TEST_PICKER_MARKER;
+  if (pickerMarker) {
+    fs.mkdirSync(path.dirname(pickerMarker), { recursive: true });
+    fs.writeFileSync(pickerMarker, JSON.stringify({
+      stage: "opening-model-picker",
+      candidates,
+      timestamp: new Date().toISOString()
+    }));
   }
 
-  if (!isUsable(destination) || fs.statSync(destination).size !== sourceStat.size) {
-    throw new Error("העתקת קובץ המודל לא הושלמה. נסה לבחור את הקובץ שוב.");
+  while (!quitting) {
+    setStatus("נדרש קובץ מודל להפעלת זיהוי כתב היד. בחר את backbone.fp16.onnx...");
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+      await pause(350);
+    }
+
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "נדרש לבחור את מודל הזיהוי — backbone.fp16.onnx",
+      buttonLabel: "בחר קובץ מודל",
+      properties: ["openFile"],
+      filters: [{ name: "Mishkefet ONNX model", extensions: ["onnx"] }]
+    });
+
+    if (result.canceled || !result.filePaths || !result.filePaths[0]) {
+      const retry = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        title: "נדרש קובץ מודל להפעלה",
+        message: "לא נבחר קובץ מודל. התוכנה אינה יכולה להפעיל את מנוע הזיהוי בלעדיו.",
+        detail: "בחר את backbone.fp16.onnx או צא מהתוכנה והפעל אותה שוב לאחר הורדת המודל.",
+        buttons: ["בחירת קובץ", "יציאה מהתוכנה"],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true
+      });
+      if (retry.response === 0) continue;
+      return null;
+    }
+
+    const selected = path.resolve(result.filePaths[0]);
+    if (path.extname(selected).toLowerCase() !== ".onnx") {
+      await dialog.showMessageBox(mainWindow, {
+        type: "error",
+        title: "קובץ לא מתאים",
+        message: "יש לבחור קובץ עם סיומת .onnx.",
+        buttons: ["נסה שוב"]
+      });
+      continue;
+    }
+
+    let sourceStat;
+    try {
+      sourceStat = fs.statSync(selected);
+    } catch {
+      await dialog.showMessageBox(mainWindow, {
+        type: "error",
+        title: "לא ניתן לקרוא את הקובץ",
+        message: "הקובץ שנבחר אינו נגיש. בחר קובץ אחר.",
+        buttons: ["נסה שוב"]
+      });
+      continue;
+    }
+    if (!sourceStat.isFile() || sourceStat.size < minimumBytes) {
+      await dialog.showMessageBox(mainWindow, {
+        type: "error",
+        title: "קובץ מודל לא תקין",
+        message: "הקובץ שנבחר קטן מדי. יש לבחור את backbone.fp16.onnx המלא.",
+        detail: "גודל הקובץ צריך להיות לפחות 50 MB.",
+        buttons: ["נסה שוב"]
+      });
+      continue;
+    }
+
+    let destination = preferred;
+    try {
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      if (selected !== path.resolve(destination)) {
+        await fs.promises.copyFile(selected, destination);
+      }
+    } catch (preferredError) {
+      // Protected installation paths may be read-only: use the per-user folder.
+      destination = dataFallback;
+      try {
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        if (selected !== path.resolve(destination)) {
+          await fs.promises.copyFile(selected, destination);
+        }
+      } catch (fallbackError) {
+        const message = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+        await dialog.showMessageBox(mainWindow, {
+          type: "error",
+          title: "שמירת קובץ המודל נכשלה",
+          message: "לא ניתן להעתיק את המודל למחשב.",
+          detail: message,
+          buttons: ["נסה שוב"]
+        });
+        continue;
+      }
+    }
+
+    if (!isUsable(destination) || fs.statSync(destination).size !== sourceStat.size) {
+      await dialog.showMessageBox(mainWindow, {
+        type: "error",
+        title: "העתקת המודל לא הושלמה",
+        message: "הקובץ שהועתק אינו תקין או שההעתקה נקטעה. נסה לבחור את הקובץ שוב.",
+        buttons: ["נסה שוב"]
+      });
+      try { fs.unlinkSync(destination); } catch {}
+      continue;
+    }
+
+    setStatus("קובץ המודל נשמר בהצלחה. מפעיל את מנוע הזיהוי...");
+    return destination;
   }
-  setStatus("קובץ המודל נשמר. מפעיל את מנוע הזיהוי...");
-  return destination;
+  return null;
 }
+
 function freePort() {
   const requested=Number.parseInt(process.env.CTAV_FIXED_PORT||"",10);
   if(Number.isInteger(requested)&&requested>0&&requested<65536)return Promise.resolve(requested);
@@ -358,7 +481,7 @@ async function waitForServer(url, logFile) {
   throw new Error("השרת המקומי לא עלה בזמן. יומן: "+logFile);
 }
 app.whenReady().then(async()=>{
-  mainWindow=new BrowserWindow({width:1280,height:900,minWidth:900,minHeight:650,show:process.env.CTAV_SMOKE_TEST!=="1",
+  mainWindow=new BrowserWindow({width:1280,height:900,minWidth:900,minHeight:650,show:process.env.CTAV_SMOKE_TEST!=="1" || !!process.env.CTAV_SMOKE_TEST_PICKER_MARKER,
     autoHideMenuBar:true,title:"כתב יד",backgroundColor:"#111827",
     webPreferences:{contextIsolation:true,nodeIntegration:false,sandbox:true}});
   try{
@@ -373,6 +496,12 @@ app.whenReady().then(async()=>{
     for(const d of [dbDir,dataDir,logsDir])fs.mkdirSync(d,{recursive:true});
     const exeDir=process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath);
     const selectedModelPath=await ensureModelFile(exeDir,dataRoot);
+    if (!selectedModelPath) {
+      setStatus("לא נבחר מודל זיהוי. התוכנה תיסגר; הפעל אותה שוב ובחר backbone.fp16.onnx.");
+      await pause(700);
+      app.quit();
+      return;
+    }
     const appRoot=path.join(process.resourcesPath,"runtime");
     const supportDir=path.join(appRoot,"models","mishkefet");
     for(const file of ["charset.json","charlm.bin","words.bin","head.bin"]) {
@@ -427,6 +556,28 @@ $effectsNew = @'
     void refreshDocs();
   }, [refreshAdapt, refreshDocs]);
 
+  // Parse API bodies defensively so an empty or non-JSON response becomes a useful diagnostic.
+  async function readModelApiJson<T>(response: Response, operation: string): Promise<T> {
+    const raw = await response.text();
+    if (!raw.trim()) {
+      throw new Error(operation + ": השרת החזיר תשובה ריקה (HTTP " + response.status + "). בדוק את יומן השרת.");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      const preview = raw.slice(0, 180).replace(/\s+/g, " ");
+      throw new Error(operation + ": השרת לא החזיר JSON תקין (HTTP " + response.status + "). " + preview);
+    }
+    if (!response.ok) {
+      const detail = parsed && typeof parsed === "object" && "error" in parsed
+        ? String((parsed as { error?: unknown }).error ?? "")
+        : "";
+      throw new Error(operation + " נכשל (HTTP " + response.status + "). " + detail);
+    }
+    return parsed as T;
+  }
+
   // The UI renders first. Only then does the background model warm-up begin.
   useEffect(() => {
     let cancelled = false;
@@ -436,7 +587,7 @@ $effectsNew = @'
         setModelLoadState("checking");
         setModelLoadMessage("בודק את קובץ מודל הזיהוי...");
         const check = await fetch("/api/mishkefet/ready", { cache: "no-store" });
-        const info = (await check.json()) as { exists?: boolean; modelPath?: string };
+        const info = await readModelApiJson<{ exists?: boolean; modelPath?: string }>(check, "בדיקת קובץ המודל");
         if (cancelled) return;
         if (!check.ok || !info.exists) {
           setModelLoadState("missing");
@@ -453,7 +604,7 @@ $effectsNew = @'
         }, 5000);
 
         const response = await fetch("/api/mishkefet/ready", { method: "POST" });
-        const result = (await response.json()) as { ready?: boolean; error?: string };
+        const result = await readModelApiJson<{ ready?: boolean; error?: string; modelPath?: string }>(response, "טעינת מנוע הזיהוי");
         if (cancelled) return;
         if (!response.ok || !result.ready) {
           setModelLoadState("error");
