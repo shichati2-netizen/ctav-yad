@@ -10,13 +10,28 @@ function Show-SmokeLogs([string]$LogFile) {
   }
 }
 
+function Stop-SmokeProcess($Process) {
+  if ($Process) {
+    try {
+      $Process.Refresh()
+      if (-not $Process.HasExited) {
+        & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
+      }
+    } catch {}
+  }
+}
+
 $packageDir = Join-Path $env:GITHUB_WORKSPACE "dist/KtavYad"
 $appDir = Join-Path $packageDir "Application"
 $exePath = Join-Path $appDir "KtavYad.exe"
 $modelSource = Join-Path $env:GITHUB_WORKSPACE "dist/model-asset/backbone.fp16.onnx"
 $testRoot = Join-Path $env:RUNNER_TEMP "ktavyad-electron-smoke"
-$marker = Join-Path $testRoot "startup-marker.json"
-$logFile = Join-Path $testRoot "KtavYad-Data/logs/server.log"
+$pickerRoot = Join-Path $testRoot "picker-only"
+$fullRoot = Join-Path $testRoot "full-runtime"
+$pickerMarker = Join-Path $pickerRoot "model-picker-invoked.json"
+$marker = Join-Path $fullRoot "startup-marker.json"
+$logFile = Join-Path $fullRoot "KtavYad-Data/logs/server.log"
+$pickerProc = $null
 $proc = $null
 
 foreach ($required in @($exePath, $modelSource)) {
@@ -31,10 +46,48 @@ if ($modelInfo.Length -lt 50MB) {
 if (Test-Path -LiteralPath $testRoot) {
   Remove-Item -LiteralPath $testRoot -Recurse -Force
 }
-New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "models/mishkefet") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "AppData/Roaming") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $testRoot "AppData/Local") | Out-Null
-$modelCopy = Join-Path $testRoot "models/mishkefet/backbone.fp16.onnx"
+New-Item -ItemType Directory -Force -Path $pickerRoot | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $pickerRoot "AppData/Roaming") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $pickerRoot "AppData/Local") | Out-Null
+
+# First launch with no ONNX model anywhere: prove the actual Electron picker path is invoked.
+$env:PORTABLE_EXECUTABLE_DIR = $pickerRoot
+$env:CTAV_SMOKE_TEST = "1"
+$env:CTAV_SMOKE_TEST_PICKER_MARKER = $pickerMarker
+$env:APPDATA = Join-Path $pickerRoot "AppData/Roaming"
+$env:LOCALAPPDATA = Join-Path $pickerRoot "AppData/Local"
+Write-Host "Verifying first-run ONNX model picker with no model file present..."
+$pickerProc = Start-Process -FilePath $exePath -PassThru -WindowStyle Normal
+$pickerOpened = $false
+for ($i = 0; $i -lt 40; $i++) {
+  $pickerProc.Refresh()
+  if ($pickerProc.HasExited) {
+    throw "KtavYad.exe exited before invoking the first-run model picker (exit code $($pickerProc.ExitCode))."
+  }
+  if (Test-Path -LiteralPath $pickerMarker -PathType Leaf) {
+    $pickerOpened = $true
+    break
+  }
+  Start-Sleep -Milliseconds 500
+}
+if (-not $pickerOpened) {
+  Stop-SmokeProcess $pickerProc
+  throw "First-run model picker was not invoked when no ONNX file existed."
+}
+$pickerResult = Get-Content -LiteralPath $pickerMarker -Raw | ConvertFrom-Json
+if ($pickerResult.stage -ne "opening-model-picker") {
+  throw "First-run model picker marker has an unexpected state: $($pickerResult.stage)"
+}
+Write-Host "FIRST-RUN MODEL PICKER TEST PASSED: no model found; Electron opened the ONNX file-selection dialog."
+Stop-SmokeProcess $pickerProc
+$pickerProc = $null
+Start-Sleep -Seconds 2
+
+# Second launch: simulate the user's selection being copied to the preferred portable model location.
+New-Item -ItemType Directory -Force -Path (Join-Path $fullRoot "models/mishkefet") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $fullRoot "AppData/Roaming") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $fullRoot "AppData/Local") | Out-Null
+$modelCopy = Join-Path $fullRoot "models/mishkefet/backbone.fp16.onnx"
 Copy-Item -LiteralPath $modelSource -Destination $modelCopy
 if ((Get-Item -LiteralPath $modelCopy).Length -ne $modelInfo.Length) {
   throw "The ONNX model copy for the packaged EXE smoke test is incomplete."
@@ -46,12 +99,13 @@ $listener.Start()
 $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
 $listener.Stop()
 
-$env:PORTABLE_EXECUTABLE_DIR = $testRoot
+$env:PORTABLE_EXECUTABLE_DIR = $fullRoot
 $env:CTAV_SMOKE_TEST = "1"
 $env:CTAV_FIXED_PORT = [string]$port
 $env:CTAV_SMOKE_TEST_MARKER = $marker
-$env:APPDATA = Join-Path $testRoot "AppData/Roaming"
-$env:LOCALAPPDATA = Join-Path $testRoot "AppData/Local"
+Remove-Item Env:CTAV_SMOKE_TEST_PICKER_MARKER -ErrorAction SilentlyContinue
+$env:APPDATA = Join-Path $fullRoot "AppData/Roaming"
+$env:LOCALAPPDATA = Join-Path $fullRoot "AppData/Local"
 
 Write-Host "Launching the real packaged Windows executable: $exePath"
 Write-Host "Using external model asset: $([math]::Round($modelInfo.Length / 1MB, 1)) MB"
@@ -114,11 +168,15 @@ try {
   }
   Write-Host "Packaged EXE loaded $($scripts.Count) JavaScript bundles."
 
-  $modelState = Invoke-RestMethod -Uri "$baseUrl/api/mishkefet/ready" -Method Get -TimeoutSec 20
+  $modelResponse = Invoke-WebRequest -Uri "$baseUrl/api/mishkefet/ready" -Method Get -TimeoutSec 20
+  if ($modelResponse.StatusCode -ne 200 -or $modelResponse.Headers["Content-Type"] -notmatch "application/json") {
+    throw "Model readiness endpoint did not return HTTP 200 JSON."
+  }
+  $modelState = $modelResponse.Content | ConvertFrom-Json
   if ($modelState.exists -ne $true) {
     throw "Packaged EXE could not see the external ONNX model: $($modelState.modelPath)"
   }
-  Write-Host "Packaged EXE resolved the external ONNX model path."
+  Write-Host "Packaged EXE readiness endpoint returned valid JSON and resolved the external ONNX model path."
 
   # This exercises the actual Electron-launched server, native ONNX binding,
   # bundled Windows DLL and model graph. Missing local devices are not tested.
@@ -127,16 +185,11 @@ try {
   if ($ready.ready -ne $true) {
     throw "The packaged EXE could not initialize the ONNX model: $($ready.error)"
   }
-  Write-Host "PACKAGED EXE SMOKE TEST PASSED: Electron, local server, Hebrew UI, JS bundles, external model and ONNX native runtime."
+  Write-Host "PACKAGED EXE SMOKE TEST PASSED: first-run picker, Electron, local server, Hebrew UI, JSON readiness API, external model and ONNX native runtime."
 } catch {
   Show-SmokeLogs $logFile
   throw
 } finally {
-  if ($proc) {
-    $proc.Refresh()
-    if (-not $proc.HasExited) {
-      Write-Host "Stopping the packaged EXE smoke-test process tree."
-      & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
-    }
-  }
+  Stop-SmokeProcess $pickerProc
+  Stop-SmokeProcess $proc
 }
