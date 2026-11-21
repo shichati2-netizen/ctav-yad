@@ -186,6 +186,111 @@ try {
     throw "The packaged EXE could not initialize the ONNX model: $($ready.error)"
   }
   Write-Host "PACKAGED EXE SMOKE TEST PASSED: first-run picker, Electron, local server, Hebrew UI, JSON readiness API, external model and ONNX native runtime."
+
+  # Regression test for existing PGlite databases that contain all app tables
+  # but predate the Drizzle migration ledger (the user's reported 42P07 failure).
+  Stop-SmokeProcess $proc
+  $proc = $null
+  Start-Sleep -Seconds 2
+  $runtimeDir = Join-Path $appDir "resources/runtime"
+  $databaseDir = Join-Path $fullRoot "KtavYad-Data/database"
+  $env:PGLITE_DATA_DIR = $databaseDir
+  $legacySeedScript = @'
+const { PGlite } = require("@electric-sql/pglite");
+(async () => {
+  const db = new PGlite(process.env.PGLITE_DATA_DIR);
+  await db.waitReady;
+  const table = await db.query("SELECT to_regclass('public.documents') AS name");
+  if (!table.rows[0].name) throw new Error("Existing documents table was not found.");
+  await db.query(
+    "INSERT INTO public.documents (name, width, height, image_base64) VALUES ($1, $2, $3, $4)",
+    ["ctav-migration-preservation-smoke-test", 1, 1, "AA=="],
+  );
+  const history = await db.query("SELECT to_regclass('drizzle.__drizzle_migrations') AS name");
+  if (!history.rows[0].name) throw new Error("Expected the initial migration ledger to exist before simulating a legacy database.");
+  await db.exec("DROP TABLE drizzle.__drizzle_migrations");
+  await db.close();
+  process.stdout.write("Legacy DB prepared: existing app tables and sentinel data preserved; Drizzle ledger removed.\n");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+'@
+  Push-Location $runtimeDir
+  try {
+    & node -e $legacySeedScript
+    if ($LASTEXITCODE -ne 0) { throw "Could not prepare the legacy PGlite database regression test." }
+  } finally {
+    Pop-Location
+    Remove-Item Env:PGLITE_DATA_DIR -ErrorAction SilentlyContinue
+  }
+
+  Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+  Write-Host "Restarting the real Electron app against an existing database without a migration ledger..."
+  $proc = Start-Process -FilePath $exePath -PassThru -WindowStyle Hidden
+  $legacyStarted = $false
+  for ($i = 0; $i -lt 90; $i++) {
+    $proc.Refresh()
+    if ($proc.HasExited) {
+      Show-SmokeLogs $logFile
+      throw "KtavYad.exe failed to restart against the existing legacy database (exit code $($proc.ExitCode))."
+    }
+    if (Test-Path -LiteralPath $marker -PathType Leaf) {
+      $legacyStarted = $true
+      break
+    }
+    Start-Sleep -Seconds 1
+  }
+  if (-not $legacyStarted) {
+    Show-SmokeLogs $logFile
+    throw "The app did not complete startup against an existing legacy database."
+  }
+  $legacyStartup = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+  $legacyBaseUrl = [string]$legacyStartup.baseUrl
+  $legacyHealth = Invoke-WebRequest -Uri "$legacyBaseUrl/api/health" -TimeoutSec 20
+  if ($legacyHealth.StatusCode -ne 200) {
+    throw "The app health endpoint failed after adopting the legacy database."
+  }
+  Write-Host "LEGACY DATABASE RESTART PASSED: existing schema was adopted without replaying duplicate CREATE TABLE statements."
+
+  Stop-SmokeProcess $proc
+  $proc = $null
+  Start-Sleep -Seconds 2
+  $env:PGLITE_DATA_DIR = $databaseDir
+  $verifyDataScript = @'
+const { PGlite } = require("@electric-sql/pglite");
+(async () => {
+  const db = new PGlite(process.env.PGLITE_DATA_DIR);
+  await db.waitReady;
+  const preserved = await db.query(
+    "SELECT count(*)::int AS count FROM public.documents WHERE name = $1",
+    ["ctav-migration-preservation-smoke-test"],
+  );
+  if (preserved.rows[0].count !== 1) {
+    throw new Error("Existing user data was not preserved across the schema adoption.");
+  }
+  const history = await db.query(
+    "SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations",
+  );
+  if (history.rows[0].count < 1) {
+    throw new Error("The baseline migration was not recorded after adopting the existing schema.");
+  }
+  await db.close();
+  process.stdout.write("Legacy database data preserved and baseline migration ledger restored.\n");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+'@
+  Push-Location $runtimeDir
+  try {
+    & node -e $verifyDataScript
+    if ($LASTEXITCODE -ne 0) { throw "Legacy database data or migration history verification failed." }
+  } finally {
+    Pop-Location
+    Remove-Item Env:PGLITE_DATA_DIR -ErrorAction SilentlyContinue
+  }
+  Write-Host "LEGACY DATABASE DATA PRESERVATION PASSED: user rows remain intact and migration history is initialized."
 } catch {
   Show-SmokeLogs $logFile
   throw
