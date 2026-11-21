@@ -47,6 +47,8 @@ The model weights and their derivatives may not be used commercially.
 # Replace the server-only PostgreSQL driver with local, disk-persistent PGlite.
 $dbFile = Join-Path $source "src/db/index.ts"
 @'
+import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
@@ -56,15 +58,68 @@ const buildMode = process.env.CTAV_BUILD_MODE === "1";
 const dataDir = process.env.PGLITE_DATA_DIR || path.join(process.cwd(), "data", "database");
 const migrationsFolder = process.env.DRIZZLE_MIGRATIONS_DIR || path.join(process.cwd(), "drizzle");
 
-const client = buildMode ? new PGlite() : new PGlite(dataDir);
+const globalForCtav = globalThis as typeof globalThis & {
+  __ctavPglite?: PGlite;
+  __ctavDatabaseReady?: Promise<void>;
+};
+
+const client = buildMode
+  ? new PGlite()
+  : (globalForCtav.__ctavPglite ??= new PGlite(dataDir));
 export const db = drizzle(client);
+
+async function adoptExistingBaseline(): Promise<void> {
+  const journalPath = path.join(migrationsFolder, "meta", "_journal.json");
+  if (!fs.existsSync(journalPath)) return;
+
+  const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+    entries?: Array<{ idx: number; when: number; tag: string }>;
+  };
+  const first = journal.entries?.find((entry) => entry.idx === 0);
+  if (!first) return;
+
+  const migrationPath = path.join(migrationsFolder, first.tag + ".sql");
+  if (!fs.existsSync(migrationPath)) return;
+  const migrationSql = fs.readFileSync(migrationPath, "utf8");
+
+  // Older portable builds may already have created the app tables without
+  // recording this generated baseline in Drizzle's migration history.
+  const expectedTables = [
+    ...new Set(
+      [...migrationSql.matchAll(/\bCREATE TABLE\s+(?:(?:"[^"]+"\.)?)"([^"]+)"/gi)]
+        .map((match) => match[1]),
+    ),
+  ];
+  if (!expectedTables.includes("documents") || expectedTables.length === 0) return;
+
+  const actualResult = await client.query(
+    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
+  );
+  const actualTables = new Set(actualResult.rows.map((row: { table_name: string }) => row.table_name));
+  if (!expectedTables.every((tableName) => actualTables.has(tableName))) return;
+
+  await client.exec(
+    "CREATE SCHEMA IF NOT EXISTS drizzle; " +
+    "CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (" +
+    "id SERIAL PRIMARY KEY NOT NULL, hash text NOT NULL, created_at bigint)",
+  );
+
+  const hash = crypto.createHash("sha256").update(migrationSql).digest("hex");
+  await client.query(
+    "INSERT INTO drizzle.__drizzle_migrations (hash, created_at) " +
+    "SELECT $1, $2 WHERE NOT EXISTS (" +
+    "SELECT 1 FROM drizzle.__drizzle_migrations WHERE hash = $1 AND created_at = $2)",
+    [hash, Number(first.when)],
+  );
+}
 
 export const databaseReady = buildMode
   ? Promise.resolve()
-  : (async () => {
+  : (globalForCtav.__ctavDatabaseReady ??= (async () => {
       await client.waitReady;
+      await adoptExistingBaseline();
       await migrate(db, { migrationsFolder });
-    })();
+    })());
 '@ | Set-Content -Path $dbFile -Encoding utf8
 
 @'
@@ -691,6 +746,16 @@ Set-Content -Path $componentFile -Value $componentText -Encoding utf8
 $env:CTAV_BUILD_MODE = "1"
 $env:NEXT_TELEMETRY_DISABLED = "1"
 Invoke-Checked "npx" @("drizzle-kit", "generate", "--config=drizzle.config.ts") "Generating local database migrations failed."
+# The source archive does not carry generated migration history between releases.
+# Keep the single full-schema baseline at a fixed timestamp so a later build does
+# not try to create the same eight tables again in an existing portable database.
+$journalPath = Join-Path $source "drizzle/meta/_journal.json"
+$journal = Get-Content -LiteralPath $journalPath -Raw | ConvertFrom-Json
+if ($journal.entries.Count -eq 1 -and $journal.entries[0].idx -eq 0) {
+  $journal.entries[0].when = [long]1700000000000
+  $journal | ConvertTo-Json -Depth 50 | Set-Content -LiteralPath $journalPath -Encoding utf8
+  Write-Host "Pinned the generated initial database baseline timestamp for repeatable upgrades."
+}
 if (-not (Test-Path (Join-Path $source "drizzle/meta/_journal.json"))) { throw "Drizzle migration journal was not generated." }
 
 # Build with the same Turbopack runtime that passed the standalone PGlite smoke test.
