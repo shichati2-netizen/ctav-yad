@@ -95,7 +95,7 @@ async function adoptExistingBaseline(): Promise<void> {
   const actualResult = await client.query(
     "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
   );
-  const actualTables = new Set(actualResult.rows.map((row: { table_name: string }) => row.table_name));
+  const actualTables = new Set((actualResult.rows as Array<{ table_name: string }>).map((row) => row.table_name));
   if (!expectedTables.every((tableName) => actualTables.has(tableName))) return;
 
   await client.exec(
